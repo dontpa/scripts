@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         V2EX 帖子楼层重排 (Hacker News Style) - 紧凑极简版
+// @name         V2EX 帖子楼层重排 (Hacker News Style) - 修复版
 // @namespace    http://tampermonkey.net/
-// @version      1.10
-// @description  全量加载多页，优先使用@匹配以解决删帖导致的楼层错位，极简 Reddit 风格，舒适阅读
+// @version      1.11
+// @description  全量加载多页，精准识别“@用户 #楼层”组合，修复回复老楼层被误判为最近楼层的问题
 // @author       Gemini
 // @match        https://v2ex.com/t/*
 // @match        https://www.v2ex.com/t/*
@@ -115,15 +115,35 @@
     }
 
     /**
-     * 推测父级楼层 - v1.10 逻辑修正版
+     * 推测父级楼层 - v1.11 逻辑修正版
+     * 策略：精确匹配 > @模糊匹配 > #模糊匹配
      */
     function inferParent(reply, allReplies) {
-        // 1. 优先匹配 @用户名
-        // V2EX 有删帖机制会导致楼层号发生错位偏移，但 @用户名 是硬编码在文本里的，绝不会错位
+        // 提取信息
+        const floorMatch = reply.textContent.match(/#(\d+)/);
         const mentionMatch = reply.contentHtml.match(/\/member\/([\w]+)/);
+        
+        // 1. 【精准匹配】 同时存在 @User 和 #Floor
+        // 场景：回复 @wzw #20 (wzw在#20和#24都有发言) -> 必须挂在 #20 下，而不是 #24
+        if (mentionMatch && floorMatch) {
+            const targetUser = mentionMatch[1];
+            const targetFloor = parseInt(floorMatch[1], 10);
+            
+            // 找到该楼层
+            const targetReply = allReplies.find(r => r.floor === targetFloor);
+            
+            // 校验：该楼层的作者是否就是 @ 的那个人？
+            if (targetReply && targetReply.author.toLowerCase() === targetUser.toLowerCase()) {
+                return targetReply; // 完美匹配，直接返回
+            }
+            // 如果作者不匹配（可能因为删帖导致楼层错位），则跳过此步，进入下面的 @模糊匹配
+        }
+
+        // 2. 【@模糊匹配】 只有 @User 或 精准匹配失败
+        // 场景：只写了 @User，或者楼层号因删帖已经不对了
         if (mentionMatch) {
             const targetUser = mentionMatch[1];
-            // 倒序遍历，寻找该用户距离当前楼层最近的一次发言
+            // 倒序寻找该用户最近的一次发言
             for (let i = allReplies.length - 1; i >= 0; i--) {
                 const r = allReplies[i];
                 if (r.floor < reply.floor && r.author.toLowerCase() === targetUser.toLowerCase()) {
@@ -132,8 +152,8 @@
             }
         }
 
-        // 2. 如果没有 @用户名，再去尝试兜底匹配 #楼层号
-        const floorMatch = reply.textContent.match(/#(\d+)/);
+        // 3. 【#模糊匹配】 只有 #Floor
+        // 场景：只写了 #20
         if (floorMatch) {
             const targetFloor = parseInt(floorMatch[1], 10);
             if (targetFloor < reply.floor) {
