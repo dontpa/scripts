@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.0
+// @version      2.0.1
 // @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码（含 URL 百分号编码场景，支持复制/打开）；每日自动签到；高赞回复阅览室。
 // @author       you
 // @match        https://v2ex.com/*
@@ -293,14 +293,14 @@
     }
 
     async function run() {
-      if (!CFG.notify) return; // 你不想通知就直接关（也可以只改 notify()）
+      if (!CFG.notify) return;
       if (!isLoggedIn()) return;
 
       const today = ymdLocal();
       const last = GM_getValue(CFG.storeKey, '');
       if (last === today) return;
 
-      GM_setValue(CFG.storeKey, today); // 先占坑，防多标签重复
+      GM_setValue(CFG.storeKey, today);
       await sleep(randInt(CFG.delayMinMs, CFG.delayMaxMs));
 
       const html1 = await fetchText(CFG.dailyPage);
@@ -328,11 +328,10 @@
     }
 
     function boot() {
-      // 只要在 v2ex 页面就可跑；但别抢首屏，等 load
       window.addEventListener('load', () => {
         setTimeout(() => {
           run().catch(err => {
-            GM_setValue(CFG.storeKey, ''); // 出错允许重试
+            GM_setValue(CFG.storeKey, '');
             if (CFG.notify) notify('V2EX 签到', `失败：${err?.message || err}`);
           });
         }, 800);
@@ -343,17 +342,16 @@
   })();
 
   // =========================
-  // 3) 功能B：Base64 自动解码（兼容楼层重排/多页加载）
+  // 3) 功能B：Base64 自动解码（优化版，支持含Null字符的文本/URL）
   // =========================
   const B64 = (() => {
     const CFG = {
       MAX_LEN: 4096,
-      URL_ONLY: false, // 只展示可还原为 URL 的解码结果
+      URL_ONLY: false,
       TARGET_SELECTORS: ['.topic_content', '.reply_content'],
-      SKIP_IN_LINK_TEXT_REPLACE: true, // 不替换 <a> 内文本（但可在链接后追加 badge）
+      SKIP_IN_LINK_TEXT_REPLACE: true,
     };
 
-    // 允许零宽字符/空白穿插（站点为换行插入 \u200b 时也能匹配）
     const SEP_RE = /[\s\u200b\u200c\u200d\uFEFF]/g;
     const B64_RE = /(^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){15,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2}))(?=[^A-Za-z0-9+/_-]|$)/g;
 
@@ -372,7 +370,8 @@
 
     function extractFirstUrl(s) {
       if (!s) return null;
-      const m = s.match(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>]+/);
+      // 允许提取可能被非法字符包裹的 URL
+      const m = s.match(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>\x00-\x08\x0B\x0C\x0E-\x1F]+/);
       return m ? m[0] : null;
     }
 
@@ -389,34 +388,48 @@
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
+      // 解码
       const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 
-      // 控制字符过滤（保留 \n \r \t）
-      const bad = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
-      if (bad > 0) return null;
+      // 1. 先尝试移除控制字符（保留换行Tab等），解决 Thunder/Flash 链接问题
+      // Thunder 链接解码后通常前后会有 \x00 等字符
+      const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
 
-      if (!CFG.URL_ONLY) {
-        const t = text.trim();
-        return t ? { display: t, url: extractFirstUrl(t) } : null;
-      }
+      // 2. 如果原始内容和清理后的内容长度不一致（说明包含控制字符），
+      //    为了防止显示纯二进制乱码，我们要求清理后的内容必须包含一个 URL 或者是纯文本链接形式才允许显示。
+      //    或者，如果只是少量控制字符但整体是可读文本，也放行。
+      //    这里简化策略：如果有 Bad Chars，必须能提取出 URL，或者 URL_ONLY=false 且清理后不为空。
+      
+      const hadBad = text.length !== cleanText.length;
 
-      // URL_ONLY：先直接找 URL
-      const url1 = extractFirstUrl(text);
+      // 尝试提取 URL
+      const url1 = extractFirstUrl(cleanText);
       if (url1) return { display: url1, url: url1 };
 
-      // 修复你这帖里典型问题：解码后是 https%3A%2F%2F... 这类百分号编码
-      if (/%[0-9A-Fa-f]{2}/.test(text)) {
-        const u = safeDecodeURIComponent(text);
-        if (u) {
-          const url2 = extractFirstUrl(u);
-          if (url2) return { display: url2, url: url2 };
-        }
-      }
+      // 如果有 Bad Chars 且没提取到 URL，视为二进制垃圾，丢弃
+      if (hadBad) return null;
 
-      // 兜底：有些人会把 URL 前面加点前缀文字（例如 “xxxhttps://...”）
-      if (text.includes('://')) {
-        const url3 = extractFirstUrl(text);
-        if (url3) return { display: url3, url: url3 };
+      if (!CFG.URL_ONLY) {
+        const t = cleanText.trim();
+        if (!t) return null;
+        
+        // 尝试处理百分号编码
+        if (/%[0-9A-Fa-f]{2}/.test(t)) {
+          const u = safeDecodeURIComponent(t);
+          if (u) {
+            const url2 = extractFirstUrl(u);
+            if (url2) return { display: url2, url: url2 };
+            return { display: u, url: null };
+          }
+        }
+        
+        // 尝试处理 "前缀+URL" 形式
+        if (t.includes('://')) {
+          const url3 = extractFirstUrl(t);
+          if (url3) return { display: url3, url: url3 };
+        }
+
+        return { display: t, url: null };
       }
 
       return null;
@@ -496,14 +509,12 @@
       node.parentNode.replaceChild(frag, node);
     }
 
-    // 如果 base64 出现在 <a> 文本里：不替换链接文本，只在链接后追加 badge
     function processLinkText(el) {
       if (!el || el.nodeType !== 1) return;
-      if (!el.matches('a')) return;
+      if (el.matches('a')) return;
       if (el.dataset.v2b64linkscanned === '1') return;
 
       const t = el.textContent || '';
-      // 直接在 link 文本上跑一次正则（这里不需要边界前缀逻辑太复杂，命中就追加）
       const m = t.match(/[A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){15,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2})/);
       if (m) {
         const decodedObj = tryDecodeBase64(m[0]);
@@ -520,7 +531,6 @@
       if (!el || el.nodeType !== 1) return;
       if (el.dataset.v2b64scanned === '1') return;
 
-      // 1) 普通文本节点替换
       const walker = document.createTreeWalker(
         el,
         NodeFilter.SHOW_TEXT,
@@ -533,7 +543,6 @@
       while (walker.nextNode()) nodes.push(walker.currentNode);
       nodes.forEach(processTextNode);
 
-      // 2) 链接文本仅追加 badge（不破坏链接）
       if (CFG.SKIP_IN_LINK_TEXT_REPLACE) {
         el.querySelectorAll('a').forEach(processLinkText);
       }
@@ -547,7 +556,6 @@
       }
     }
 
-    // 兼容你“多页加载+重排”：监听 DOM 更新，节流扫描
     let scheduled = false;
     const scheduleScan = () => {
       if (scheduled) return;
@@ -560,9 +568,7 @@
 
     function boot() {
       if (!isTopicPage()) return;
-
       scanAll();
-
       const root = document.querySelector('#Main') || document.body;
       const observer = new MutationObserver((mutations) => {
         for (const m of mutations) {
@@ -577,7 +583,7 @@
   })();
 
   // =========================
-  // 4) 功能C：楼层树 + 多页加载（Hacker News Style）
+  // 4) 功能C：楼层树 + 多页加载
   // =========================
   const ThreadTree = (() => {
     function parseReplyCell(cell) {
@@ -595,7 +601,6 @@
         .map(a => (a.getAttribute('href') || '').split('/').pop())
         .filter(Boolean);
 
-      // 额外：兼容纯文本 @user（极少见）
       const plainMentions = (contentEl.innerText.match(/@([A-Za-z0-9_]+)/g) || []).map(s => s.slice(1));
       const allMentions = Array.from(new Set([...mentionUsers, ...plainMentions]));
 
@@ -617,24 +622,18 @@
       return cells.map(parseReplyCell).filter(Boolean);
     }
 
-    // 精准匹配 > @模糊匹配 > #模糊匹配
     function inferParent(reply, allReplies) {
       const floorMatch = reply.textContent.match(/#(\d+)/);
       const targetFloor = floorMatch ? parseInt(floorMatch[1], 10) : null;
-
-      // 取第一个 mention（大多数回复意图是“向上@”）
       const targetUser = reply.mentions?.[0] || null;
 
-      // 1) 精准匹配：@User + #Floor 且楼层作者一致
       if (targetUser && targetFloor) {
         const targetReply = allReplies.find(r => r.floor === targetFloor);
         if (targetReply && targetReply.author.toLowerCase() === targetUser.toLowerCase()) {
           return targetReply;
         }
-        // 作者不匹配：可能删帖导致错位，继续走 @ 模糊
       }
 
-      // 2) @模糊：只 @User 或精准失败 => 挂到该用户最近一次发言
       if (targetUser) {
         for (let i = allReplies.length - 1; i >= 0; i--) {
           const r = allReplies[i];
@@ -642,7 +641,6 @@
         }
       }
 
-      // 3) #模糊：只 #Floor
       if (targetFloor && targetFloor < reply.floor) {
         const parent = allReplies.find(r => r.floor === targetFloor);
         if (parent) return parent;
@@ -653,10 +651,8 @@
 
     function renderTree(flatReplies, container) {
       const roots = [];
-
       flatReplies.forEach(r => { r.children = []; });
 
-      // 构建树
       flatReplies.forEach(r => {
         const parent = inferParent(r, flatReplies);
         if (parent) parent.children.push(r);
@@ -715,12 +711,10 @@
 
     async function init() {
       if (!isTopicPage()) return;
-
       const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
       if (!topicId) return;
 
-      const replyBox = Array.from(document.querySelectorAll('.box'))
-        .find(b => b.querySelector('div[id^="r_"]'));
+      const replyBox = Array.from(document.querySelectorAll('.box')).find(b => b.querySelector('div[id^="r_"]'));
       if (!replyBox) return;
 
       const loadingBar = document.createElement('div');
@@ -728,7 +722,6 @@
       loadingBar.innerText = '加载中...';
       replyBox.parentNode.insertBefore(loadingBar, replyBox);
 
-      // 计算总页数
       let totalPages = 1;
       const pageInput = document.querySelector('.page_input');
       if (pageInput) {
@@ -743,7 +736,6 @@
       let allReplies = [];
       allReplies = allReplies.concat(extractRepliesFromDoc(document));
 
-      // 拉取其它页
       if (totalPages > 1) {
         const currentP = parseInt(new URLSearchParams(location.search).get('p') || '1', 10);
         const fetchPromises = [];
@@ -763,7 +755,6 @@
         otherPagesReplies.forEach(list => { allReplies = allReplies.concat(list); });
       }
 
-      // 排序 + 移除分页
       allReplies.sort((a, b) => a.floor - b.floor);
       document.querySelectorAll('.page_input, .page_current, .page_normal')
         .forEach(el => el.closest('div')?.remove());
@@ -795,7 +786,6 @@
             const text = span.innerText || '';
             const m1 = text.match(/(?:♥|❤️)\s*(\d+)/);
             if (m1) { likes = parseInt(m1[1], 10); break; }
-
             const heartImg = span.querySelector('img[alt="❤️"]');
             if (heartImg && text.trim().length > 0) {
               likes = parseInt(text.trim(), 10);
@@ -817,7 +807,6 @@
           }
         } catch (_) {}
       });
-
       return comments.sort((a, b) => b.likes - a.likes);
     }
 
@@ -898,17 +887,13 @@
       overlay.appendChild(container);
       document.body.appendChild(overlay);
 
-      // 点击背景关闭
       overlay.addEventListener('click', (e) => {
         if (e.target === overlay) closeOverlay(overlay);
       });
-
-      // ESC 关闭
       const onKey = (e) => {
         if (e.key === 'Escape') closeOverlay(overlay);
       };
       document.addEventListener('keydown', onKey);
-
       overlay._cleanup = () => document.removeEventListener('keydown', onKey);
       return overlay;
     }
@@ -926,7 +911,6 @@
 
     function initButton() {
       if (!isTopicPage()) return;
-
       const topicHeader = document.querySelector('#Main .header h1');
       const boxHeader = document.querySelector('#Main .box .header');
       const target = topicHeader || boxHeader;
@@ -954,17 +938,13 @@
   })();
 
   // =========================
-  // 6) 启动顺序（协同关键）
+  // 6) 启动
   // =========================
   Daily.boot();
 
-  // 下面这些只在主题页跑
   if (isTopicPage()) {
-    // 先建树（会大量改 DOM）
     ThreadTree.boot();
-    // Base64 解码：有 observer，能接住“建树/多页插入”的变化
     B64.boot();
-    // 高赞：依赖最终 DOM，稍后插按钮即可
     HotRoom.boot();
   }
 })();
