@@ -348,7 +348,7 @@
   const B64 = (() => {
     const CFG = {
       MAX_LEN: 4096,
-      URL_ONLY: true, // 只展示可还原为 URL 的解码结果
+      URL_ONLY: false, // 只展示可还原为 URL 的解码结果
       TARGET_SELECTORS: ['.topic_content', '.reply_content'],
       SKIP_IN_LINK_TEXT_REPLACE: true, // 不替换 <a> 内文本（但可在链接后追加 badge）
     };
