@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         V2EX Suite - 楼层树重排 + Base64 解码 + 自动签到 + 高赞阅览室（协同增强版）
-// @namespace    http://tampermonkey.net/
-// @version      2.1.0
-// @description  多页全量加载后按 HN 风格楼层树重排（增强识别：锚点引用/#楼层/@强弱）；Base64 自动解码（兼容重排/动态）；全站自动签到；高赞回复沉浸阅览室（基于全量回复）
+// @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室）
+// @namespace    https://tampermonkey.net/
+// @version      2.0.0
+// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码（含 URL 百分号编码场景，支持复制/打开）；每日自动签到；高赞回复阅览室。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -19,116 +19,36 @@
   'use strict';
 
   // =========================
-  // 配置区（按需开关）
+  // 0) 通用小工具
   // =========================
-  const CFG = {
-    // 1) 楼层树重排（仅帖子页）
-    threadTree: {
-      enabled: true,
-      // 抓取其它分页的并发数（页数很大时非常重要）
-      fetchConcurrency: 4,
-      // 加载条文本开关
-      showLoadingBar: true,
-      // “新回复”标记
-      markNewReplies: true,
+  const log = (...args) => console.log('[V2EX-Enhance]', ...args);
 
-      // ✅ 新增：弱 @ 是否也尝试挂载（误判风险更高）
-      // false（推荐更准）：只对“强@（开头@）”挂载；中后部@不挂
-      // true（更“连线”）：弱@也按最近发言挂载
-      attachWeakAt: false,
-    },
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-    // 2) Base64 自动解码（仅帖子页）
-    base64: {
-      enabled: true,
-      MAX_LEN: 4096,
-      URL_ONLY: true, // true=只展示解码后像 URL 的内容
-      TARGET_SELECTORS: ['.topic_content', '.reply_content'],
-      SKIP_IN_LINK: true,
-      // 观察 DOM 变更（兼容楼层重排/懒加载/编辑器插入等）
-      observeDom: true,
-    },
-
-    // 3) 自动签到（全站）
-    daily: {
-      enabled: true,
-      dailyPage: '/mission/daily',
-      delayMinMs: 1500,
-      delayMaxMs: 3800,
-      storeKey: 'v2ex_daily_check_ymd_v2suite_v1',
-      notify: true,
-    },
-
-    // 4) 高赞回复阅览室（仅帖子页）
-    hot: {
-      enabled: true,
-    },
-  };
-
-  const isTopicPage = /^\/t\/\d+/.test(location.pathname);
-
-  // =========================
-  // 通用工具
-  // =========================
-  const log = (...args) => console.log('[V2EX-Suite]', ...args);
-
-  function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
-  }
-
-  function randInt(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-  }
-
-  async function waitForSelector(selector, timeoutMs = 12000) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
-      const el = document.querySelector(selector);
-      if (el) return el;
-      await sleep(50);
-    }
-    return null;
-  }
-
-  function parseHtml(html) {
-    return new DOMParser().parseFromString(html, 'text/html');
-  }
-
-  async function fetchText(url) {
-    const res = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      cache: 'no-store',
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-    return await res.text();
-  }
-
-  // 并发限制 map
-  async function mapLimit(items, limit, worker) {
-    const ret = [];
-    let idx = 0;
-    const runners = Array.from({ length: Math.max(1, limit) }, async () => {
-      while (idx < items.length) {
-        const cur = idx++;
-        ret[cur] = await worker(items[cur], cur);
-      }
-    });
-    await Promise.all(runners);
-    return ret;
-  }
-
-  function notify(title, text) {
-    if (!CFG.daily.notify) return;
+  function notify(title, text, timeout = 3500) {
     try {
-      GM_notification({ title, text, timeout: 4000 });
+      GM_notification({ title, text, timeout });
     } catch (_) {}
   }
 
+  function ymdLocal() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  function isTopicPage() {
+    return /^\/t\/\d+/.test(location.pathname);
+  }
+
   // =========================
-  // 样式：合并注入（避免重复插入）
+  // 1) 样式（合并注入）
   // =========================
   GM_addStyle(`
+    /* ===== 楼层树（Hacker News Style）===== */
     :root {
       --indent-width: 16px;
       --line-color: #f0f0f0;
@@ -137,7 +57,6 @@
       --bg-new: #fffdf9;
     }
 
-    /* ===== 楼层树重排样式 ===== */
     .box { padding-bottom: 0 !important; }
 
     .reply-children {
@@ -191,7 +110,7 @@
     }
     .cell[style*="text-align: center"], #bottom-pagination, a[name="last_page"] { display: none; }
 
-    /* ===== Base64 badge 样式 ===== */
+    /* ===== Base64 Badge（极简）===== */
     .v2-b64-badge{
       display:inline-flex; gap:6px; align-items:center;
       margin-left:6px; padding:2px 6px; border-radius:6px;
@@ -216,7 +135,7 @@
       color:inherit;
     }
 
-    /* ===== 高赞阅览室样式 ===== */
+    /* ===== 高赞阅览室（宽屏沉浸版）===== */
     #v2ex-hot-btn {
       display: inline-block;
       margin-left: 10px;
@@ -286,6 +205,7 @@
     }
     .user-avatar { width: 18px; height: 18px; border-radius: 3px; margin-right: 8px; }
     .user-name { font-weight: 600; color: #444; text-decoration: none; margin-right: 8px; }
+
     .floor-tag {
       background: #f5f5f5; color: #aaa;
       padding: 0 5px; border-radius: 3px;
@@ -295,6 +215,7 @@
     }
     .floor-tag:hover { background: #e6f7ff; color: #1890ff; }
     .time-tag { color: #ddd; margin-right: auto; transform: scale(0.9); transform-origin: left; }
+
     .likes-pill { font-size: 12px; font-weight: 600; padding: 0 6px; }
     .rank-1 .likes-pill { color: #faad14; }
     .rank-normal .likes-pill { color: #ff6b6b; opacity: 0.8; }
@@ -315,21 +236,35 @@
   `);
 
   // =========================
-  // 1) 自动签到（全站）
+  // 2) 功能A：每日自动签到
   // =========================
   const Daily = (() => {
-    function ymdLocal() {
-      const d = new Date();
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    }
+    const CFG = {
+      dailyPage: '/mission/daily',
+      delayMinMs: 1500,
+      delayMaxMs: 3800,
+      storeKey: 'v2ex_daily_check_ymd_v2',
+      notify: true,
+    };
 
     function isLoggedIn() {
       const hasSignOut = !!document.querySelector('a[href="/signout"]');
       const hasSignIn = !!document.querySelector('a[href="/signin"]');
       return hasSignOut || !hasSignIn;
+    }
+
+    async function fetchText(url) {
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      return await res.text();
+    }
+
+    function parseHtml(html) {
+      return new DOMParser().parseFromString(html, 'text/html');
     }
 
     function alreadyRedeemed(doc) {
@@ -348,10 +283,7 @@
         if (m?.[1]) return m[1];
       }
 
-      const any = [...doc.querySelectorAll('[onclick]')].find(el => {
-        const s = el.getAttribute('onclick') || '';
-        return s.includes('/mission/daily/redeem');
-      });
+      const any = [...doc.querySelectorAll('[onclick]')].find(el => (el.getAttribute('onclick') || '').includes('/mission/daily/redeem'));
       if (any) {
         const s = any.getAttribute('onclick') || '';
         const m = s.match(/'([^']+)'/);
@@ -361,52 +293,291 @@
     }
 
     async function run() {
-      if (!CFG.daily.enabled) return;
+      if (!CFG.notify) return; // 你不想通知就直接关（也可以只改 notify()）
       if (!isLoggedIn()) return;
 
       const today = ymdLocal();
-      const last = GM_getValue(CFG.daily.storeKey, '');
+      const last = GM_getValue(CFG.storeKey, '');
       if (last === today) return;
 
-      // 先标记今日已尝试，避免多标签页重复
-      GM_setValue(CFG.daily.storeKey, today);
+      GM_setValue(CFG.storeKey, today); // 先占坑，防多标签重复
+      await sleep(randInt(CFG.delayMinMs, CFG.delayMaxMs));
 
-      await sleep(randInt(CFG.daily.delayMinMs, CFG.daily.delayMaxMs));
+      const html1 = await fetchText(CFG.dailyPage);
+      const doc1 = parseHtml(html1);
 
-      try {
-        const html1 = await fetchText(CFG.daily.dailyPage);
-        const doc1 = parseHtml(html1);
+      if (alreadyRedeemed(doc1)) {
+        if (CFG.notify) notify('V2EX 签到', '今日奖励已领取（或已完成）');
+        return;
+      }
 
-        if (alreadyRedeemed(doc1)) {
-          notify('V2EX 签到', '今日奖励已领取（或已完成）');
-          return;
-        }
+      const redeemUrl = findRedeemUrl(doc1);
+      if (!redeemUrl) {
+        if (CFG.notify) notify('V2EX 签到', '未找到领取按钮/链接（可能结构变更）');
+        return;
+      }
 
-        const redeemUrl = findRedeemUrl(doc1);
-        if (!redeemUrl) {
-          notify('V2EX 签到', '未找到领取按钮/链接（可能结构变更）');
-          return;
-        }
+      const html2 = await fetchText(redeemUrl);
+      const doc2 = parseHtml(html2);
 
-        const html2 = await fetchText(redeemUrl);
-        const doc2 = parseHtml(html2);
-
-        if (alreadyRedeemed(doc2) || /奖励/.test(doc2.body?.innerText || '')) {
-          notify('V2EX 签到', '领取成功 ✅');
-        } else {
-          notify('V2EX 签到', '已发起领取，请打开 /mission/daily 确认');
-        }
-      } catch (err) {
-        GM_setValue(CFG.daily.storeKey, ''); // 出错允许当天重试
-        notify('V2EX 签到', `失败：${err?.message || err}`);
+      if (alreadyRedeemed(doc2) || /奖励/.test(doc2.body?.innerText || '')) {
+        if (CFG.notify) notify('V2EX 签到', '领取成功 ✅');
+      } else {
+        if (CFG.notify) notify('V2EX 签到', '已发起领取，请打开 /mission/daily 确认');
       }
     }
 
-    return { run };
+    function boot() {
+      // 只要在 v2ex 页面就可跑；但别抢首屏，等 load
+      window.addEventListener('load', () => {
+        setTimeout(() => {
+          run().catch(err => {
+            GM_setValue(CFG.storeKey, ''); // 出错允许重试
+            if (CFG.notify) notify('V2EX 签到', `失败：${err?.message || err}`);
+          });
+        }, 800);
+      });
+    }
+
+    return { boot };
   })();
 
   // =========================
-  // 2) 楼层树重排（仅帖子页）- 增强识别版
+  // 3) 功能B：Base64 自动解码（兼容楼层重排/多页加载）
+  // =========================
+  const B64 = (() => {
+    const CFG = {
+      MAX_LEN: 4096,
+      URL_ONLY: true, // 只展示可还原为 URL 的解码结果
+      TARGET_SELECTORS: ['.topic_content', '.reply_content'],
+      SKIP_IN_LINK_TEXT_REPLACE: true, // 不替换 <a> 内文本（但可在链接后追加 badge）
+    };
+
+    // 允许零宽字符/空白穿插（站点为换行插入 \u200b 时也能匹配）
+    const SEP_RE = /[\s\u200b\u200c\u200d\uFEFF]/g;
+    const B64_RE = /(^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){15,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2}))(?=[^A-Za-z0-9+/_-]|$)/g;
+
+    function normalizeBase64(s) {
+      let x = s.replace(/-/g, '+').replace(/_/g, '/').trim();
+      const pad = x.length % 4;
+      if (pad) x += '='.repeat(4 - pad);
+      return x;
+    }
+
+    function safeDecodeURIComponent(s) {
+      try { return decodeURIComponent(s); } catch (_) {}
+      try { return decodeURI(s); } catch (_) {}
+      return null;
+    }
+
+    function extractFirstUrl(s) {
+      if (!s) return null;
+      const m = s.match(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>]+/);
+      return m ? m[0] : null;
+    }
+
+    function tryDecodeBase64(raw) {
+      if (!raw) return null;
+      const cleaned = raw.replace(SEP_RE, '');
+      if (cleaned.length < 16 || cleaned.length > CFG.MAX_LEN) return null;
+
+      const norm = normalizeBase64(cleaned);
+
+      let bin;
+      try { bin = atob(norm); } catch { return null; }
+
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+
+      // 控制字符过滤（保留 \n \r \t）
+      const bad = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
+      if (bad > 0) return null;
+
+      if (!CFG.URL_ONLY) {
+        const t = text.trim();
+        return t ? { display: t, url: extractFirstUrl(t) } : null;
+      }
+
+      // URL_ONLY：先直接找 URL
+      const url1 = extractFirstUrl(text);
+      if (url1) return { display: url1, url: url1 };
+
+      // 修复你这帖里典型问题：解码后是 https%3A%2F%2F... 这类百分号编码
+      if (/%[0-9A-Fa-f]{2}/.test(text)) {
+        const u = safeDecodeURIComponent(text);
+        if (u) {
+          const url2 = extractFirstUrl(u);
+          if (url2) return { display: url2, url: url2 };
+        }
+      }
+
+      // 兜底：有些人会把 URL 前面加点前缀文字（例如 “xxxhttps://...”）
+      if (text.includes('://')) {
+        const url3 = extractFirstUrl(text);
+        if (url3) return { display: url3, url: url3 };
+      }
+
+      return null;
+    }
+
+    function makeBadge(raw, decodedObj) {
+      const { display, url } = decodedObj;
+
+      const wrap = document.createElement('span');
+      wrap.className = 'v2-b64-badge';
+      wrap.title = `base64: ${raw.replace(SEP_RE, '')}`;
+
+      const label = document.createElement('span');
+      label.className = 'v2-b64-text';
+      label.textContent = display;
+      wrap.appendChild(label);
+
+      const btnCopy = document.createElement('button');
+      btnCopy.className = 'v2-b64-btn';
+      btnCopy.textContent = '复制';
+      btnCopy.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        GM_setClipboard(display);
+        btnCopy.textContent = '已复制';
+        setTimeout(() => (btnCopy.textContent = '复制'), 900);
+      });
+      wrap.appendChild(btnCopy);
+
+      if (url) {
+        const a = document.createElement('a');
+        a.className = 'v2-b64-link';
+        a.textContent = '打开';
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        wrap.appendChild(a);
+      }
+
+      return wrap;
+    }
+
+    function shouldSkipTextNode(node) {
+      if (!node || !node.parentElement) return true;
+      if (!node.nodeValue || node.nodeValue.length < 16) return true;
+      const p = node.parentElement;
+      if (p.closest('.v2-b64-badge')) return true;
+      if (CFG.SKIP_IN_LINK_TEXT_REPLACE && p.closest('a')) return true;
+      return false;
+    }
+
+    function processTextNode(node) {
+      const text = node.nodeValue;
+      B64_RE.lastIndex = 0;
+
+      let m, last = 0;
+      let changed = false;
+      const frag = document.createDocumentFragment();
+
+      while ((m = B64_RE.exec(text)) !== null) {
+        const prefix = m[1] || '';
+        const rawWithSep = m[2];
+
+        const decodedObj = tryDecodeBase64(rawWithSep);
+        if (!decodedObj) continue;
+
+        changed = true;
+        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        if (prefix) frag.appendChild(document.createTextNode(prefix));
+        frag.appendChild(makeBadge(rawWithSep, decodedObj));
+
+        last = m.index + prefix.length + rawWithSep.length;
+      }
+
+      if (!changed) return;
+      frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+
+    // 如果 base64 出现在 <a> 文本里：不替换链接文本，只在链接后追加 badge
+    function processLinkText(el) {
+      if (!el || el.nodeType !== 1) return;
+      if (!el.matches('a')) return;
+      if (el.dataset.v2b64linkscanned === '1') return;
+
+      const t = el.textContent || '';
+      // 直接在 link 文本上跑一次正则（这里不需要边界前缀逻辑太复杂，命中就追加）
+      const m = t.match(/[A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){15,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2})/);
+      if (m) {
+        const decodedObj = tryDecodeBase64(m[0]);
+        if (decodedObj) {
+          const badge = makeBadge(m[0], decodedObj);
+          el.insertAdjacentElement('afterend', badge);
+        }
+      }
+
+      el.dataset.v2b64linkscanned = '1';
+    }
+
+    function scanElement(el) {
+      if (!el || el.nodeType !== 1) return;
+      if (el.dataset.v2b64scanned === '1') return;
+
+      // 1) 普通文本节点替换
+      const walker = document.createTreeWalker(
+        el,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode: (node) => (shouldSkipTextNode(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+        }
+      );
+
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      nodes.forEach(processTextNode);
+
+      // 2) 链接文本仅追加 badge（不破坏链接）
+      if (CFG.SKIP_IN_LINK_TEXT_REPLACE) {
+        el.querySelectorAll('a').forEach(processLinkText);
+      }
+
+      el.dataset.v2b64scanned = '1';
+    }
+
+    function scanAll() {
+      for (const sel of CFG.TARGET_SELECTORS) {
+        document.querySelectorAll(sel).forEach(scanElement);
+      }
+    }
+
+    // 兼容你“多页加载+重排”：监听 DOM 更新，节流扫描
+    let scheduled = false;
+    const scheduleScan = () => {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => {
+        scheduled = false;
+        scanAll();
+      }, 60);
+    };
+
+    function boot() {
+      if (!isTopicPage()) return;
+
+      scanAll();
+
+      const root = document.querySelector('#Main') || document.body;
+      const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (m.type === 'childList' && (m.addedNodes?.length || m.removedNodes?.length)) { scheduleScan(); break; }
+          if (m.type === 'characterData') { scheduleScan(); break; }
+        }
+      });
+      observer.observe(root, { childList: true, subtree: true, characterData: true });
+    }
+
+    return { boot };
+  })();
+
+  // =========================
+  // 4) 功能C：楼层树 + 多页加载（Hacker News Style）
   // =========================
   const ThreadTree = (() => {
     function parseReplyCell(cell) {
@@ -420,14 +591,23 @@
 
       if (!contentEl || !authorEl || !floorEl) return null;
 
+      const mentionUsers = Array.from(contentEl.querySelectorAll('a[href^="/member/"]'))
+        .map(a => (a.getAttribute('href') || '').split('/').pop())
+        .filter(Boolean);
+
+      // 额外：兼容纯文本 @user（极少见）
+      const plainMentions = (contentEl.innerText.match(/@([A-Za-z0-9_]+)/g) || []).map(s => s.slice(1));
+      const allMentions = Array.from(new Set([...mentionUsers, ...plainMentions]));
+
       return {
         element: cell,
-        id: replyId, // DOM id 的数字部分（与 #r_xxx 匹配）
+        id: replyId,
         author: authorEl.innerText,
         floor: parseInt(floorEl.innerText, 10),
         contentHtml: contentEl.innerHTML,
         textContent: contentEl.innerText,
         avatar: avatarEl ? avatarEl.src : '',
+        mentions: allMentions,
         children: [],
       };
     }
@@ -437,144 +617,48 @@
       return cells.map(parseReplyCell).filter(Boolean);
     }
 
-    // 取“去掉 code/pre 后”的纯文本，降低代码块里 #123 误判
-    function getTextNoCode(contentEl) {
-      try {
-        const clone = contentEl.cloneNode(true);
-        clone.querySelectorAll('pre, code').forEach(n => n.remove());
-        return clone.innerText || '';
-      } catch {
-        return contentEl?.innerText || '';
-      }
-    }
+    // 精准匹配 > @模糊匹配 > #模糊匹配
+    function inferParent(reply, allReplies) {
+      const floorMatch = reply.textContent.match(/#(\d+)/);
+      const targetFloor = floorMatch ? parseInt(floorMatch[1], 10) : null;
 
-    /**
-     * 父级推断（增强版）
-     * 优先级：
-     * 1) 显式锚点引用 (#r_123 / /t/xxx#r_123)
-     * 2) @user + #floor 精准匹配（支持多@多#）
-     * 3) 强@（开头@）挂到该用户最近一次发言
-     * 4) 只有 #floor
-     * 5) 弱@（中后部@）：默认不挂（CFG.threadTree.attachWeakAt=true 时才按最近一次发言挂）
-     */
-    function inferParent(reply, allReplies, maps) {
-      const { byFloor, byDomId } = maps;
+      // 取第一个 mention（大多数回复意图是“向上@”）
+      const targetUser = reply.mentions?.[0] || null;
 
-      const contentEl = reply.element.querySelector('.reply_content');
-      if (!contentEl) return null;
-
-      const html = reply.contentHtml || '';
-      const textNoCode = getTextNoCode(contentEl);
-      const text = (textNoCode || '').trim();
-
-      // ---- 提取所有 @mentions（优先用 member 链接）----
-      const mentionAnchors = Array.from(contentEl.querySelectorAll('a[href^="/member/"]'));
-      const mentions = mentionAnchors
-        .map(a => (a.getAttribute('href') || '').match(/^\/member\/([A-Za-z0-9_]+)$/)?.[1])
-        .filter(Boolean);
-
-      // fallback：极少数情况下 @ 没转成链接
-      if (mentions.length === 0) {
-        const m = text.match(/@([A-Za-z0-9_]{1,20})/g);
-        if (m) mentions.push(...m.map(s => s.slice(1)));
-      }
-
-      // ---- 抽取所有 #floor 引用（支持多个）----
-      const floorRefs = Array.from(text.matchAll(/#(\d{1,6})/g))
-        .map(x => parseInt(x[1], 10))
-        .filter(n => Number.isFinite(n));
-
-      // ---- 1) 显式锚点引用：a[href*="#r_..."] 或文本出现 r_123 ----
-      // DOM 解析更稳：支持 /t/xxx#r_123 / #r_123
-      const anchorA = Array.from(contentEl.querySelectorAll('a[href*="#r_"]'))
-        .map(a => (a.getAttribute('href') || '').match(/#(r_\d+)/)?.[1])
-        .find(Boolean);
-
-      const anchorText = (() => {
-        const m = text.match(/\b(r_\d{3,})\b/);
-        return m ? m[1] : null;
-      })();
-
-      const anchorId = anchorA || anchorText;
-      if (anchorId) {
-        const target = byDomId.get(anchorId);
-        if (target && target.floor < reply.floor) return target;
-      }
-
-      // ---- 2) 精准：@user + #floor（支持多@多#：优先能匹配作者的那一个） ----
-      if (mentions.length && floorRefs.length) {
-        for (const f of floorRefs) {
-          if (f >= reply.floor) continue;
-          const t = byFloor.get(f);
-          if (!t) continue;
-          if (mentions.some(u => u.toLowerCase() === t.author.toLowerCase())) {
-            return t;
-          }
+      // 1) 精准匹配：@User + #Floor 且楼层作者一致
+      if (targetUser && targetFloor) {
+        const targetReply = allReplies.find(r => r.floor === targetFloor);
+        if (targetReply && targetReply.author.toLowerCase() === targetUser.toLowerCase()) {
+          return targetReply;
         }
+        // 作者不匹配：可能删帖导致错位，继续走 @ 模糊
       }
 
-      // ---- 3) 强@：回复开头就是 @user（点 Reply 自动补 @ 的典型习惯）----
-      const strongAt = (() => {
-        const t = text.replace(/^[\s>\-–—：:，,。.!?（）()【】\[\]]+/, '');
-
-        // 开头是 @xxx
-        const m1 = t.match(/^@([A-Za-z0-9_]{1,20})\b/);
-        if (m1?.[1]) return m1[1];
-
-        // 或 HTML 里开头就是 member 链接（某些情况下 innerText 不以 @ 开头）
-        const trimmedHtml = (html || '').trim().replace(/^<br\s*\/?>/i, '').trim();
-        const m2 = trimmedHtml.match(/^<a[^>]+href="\/member\/([A-Za-z0-9_]+)"/i);
-        return m2?.[1] || null;
-      })();
-
-      if (strongAt) {
-        const targetUser = strongAt.toLowerCase();
+      // 2) @模糊：只 @User 或精准失败 => 挂到该用户最近一次发言
+      if (targetUser) {
         for (let i = allReplies.length - 1; i >= 0; i--) {
           const r = allReplies[i];
-          if (r.floor < reply.floor && r.author.toLowerCase() === targetUser) {
-            return r;
-          }
+          if (r.floor < reply.floor && r.author.toLowerCase() === targetUser.toLowerCase()) return r;
         }
       }
 
-      // ---- 4) 只有 #floor ----
-      if (floorRefs.length) {
-        for (const f of floorRefs) {
-          if (f < reply.floor) {
-            const p = byFloor.get(f);
-            if (p) return p;
-          }
-        }
-      }
-
-      // ---- 5) 弱@：中后部@（误判风险高）----
-      if (mentions.length) {
-        if (!CFG.threadTree.attachWeakAt) return null;
-
-        // 更愿意连线：按最近一次发言挂（更可能误判）
-        const targetUser = mentions[0].toLowerCase();
-        for (let i = allReplies.length - 1; i >= 0; i--) {
-          const r = allReplies[i];
-          if (r.floor < reply.floor && r.author.toLowerCase() === targetUser) return r;
-        }
+      // 3) #模糊：只 #Floor
+      if (targetFloor && targetFloor < reply.floor) {
+        const parent = allReplies.find(r => r.floor === targetFloor);
+        if (parent) return parent;
       }
 
       return null;
     }
 
     function renderTree(flatReplies, container) {
-      const byFloor = new Map();
-      const byDomId = new Map(); // key like 'r_123456'
       const roots = [];
 
-      flatReplies.forEach(r => {
-        byFloor.set(r.floor, r);
-        byDomId.set(`r_${r.id}`, r);
-        r.children = [];
-      });
+      flatReplies.forEach(r => { r.children = []; });
 
+      // 构建树
       flatReplies.forEach(r => {
-        const parent = inferParent(r, flatReplies, { byFloor, byDomId });
+        const parent = inferParent(r, flatReplies);
         if (parent) parent.children.push(r);
         else roots.push(r);
       });
@@ -584,7 +668,6 @@
       function appendNode(reply, parentContainer) {
         const wrapper = document.createElement('div');
         wrapper.className = 'reply-wrapper';
-
         reply.element.classList.remove('inner');
         wrapper.appendChild(reply.element);
 
@@ -594,24 +677,19 @@
           reply.children.forEach(child => appendNode(child, childrenContainer));
           wrapper.appendChild(childrenContainer);
         }
-
         parentContainer.appendChild(wrapper);
       }
 
       roots.forEach(r => appendNode(r, fragment));
-
       container.innerHTML = '';
       container.appendChild(fragment);
     }
 
     function handleReadStatus(topicId, replies) {
-      if (!CFG.threadTree.markNewReplies) return;
-
       const STORAGE_KEY = `v2_last_read_${topicId}`;
       const storedValue = localStorage.getItem(STORAGE_KEY);
-
       let maxFloor = 0;
-      for (const r of replies) maxFloor = Math.max(maxFloor, r.floor);
+      for (const r of replies) if (r.floor > maxFloor) maxFloor = r.floor;
 
       if (storedValue === null) {
         localStorage.setItem(STORAGE_KEY, String(maxFloor));
@@ -632,14 +710,28 @@
           }
         }
       }
-
       localStorage.setItem(STORAGE_KEY, String(maxFloor));
     }
 
-    function getTotalPages() {
+    async function init() {
+      if (!isTopicPage()) return;
+
+      const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
+      if (!topicId) return;
+
+      const replyBox = Array.from(document.querySelectorAll('.box'))
+        .find(b => b.querySelector('div[id^="r_"]'));
+      if (!replyBox) return;
+
+      const loadingBar = document.createElement('div');
+      loadingBar.id = 'v2ex-loading-bar';
+      loadingBar.innerText = '加载中...';
+      replyBox.parentNode.insertBefore(loadingBar, replyBox);
+
+      // 计算总页数
       let totalPages = 1;
       const pageInput = document.querySelector('.page_input');
-      if (pageInput && pageInput.max) {
+      if (pageInput) {
         totalPages = parseInt(pageInput.max, 10) || 1;
       } else {
         const pageLinks = document.querySelectorAll('a.page_normal');
@@ -647,257 +739,53 @@
           totalPages = parseInt(pageLinks[pageLinks.length - 1].innerText, 10) || 1;
         }
       }
-      return Math.max(1, totalPages);
-    }
 
-    function cleanupPagination() {
-      document.querySelectorAll('.page_input, .page_current, .page_normal').forEach(el => el.closest('div')?.remove());
-      document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
-      const bottom = document.getElementById('bottom-pagination');
-      if (bottom) bottom.remove();
-    }
+      let allReplies = [];
+      allReplies = allReplies.concat(extractRepliesFromDoc(document));
 
-    async function init() {
-      if (!CFG.threadTree.enabled) return { replyBox: null, allReplies: [] };
-      const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
-      if (!topicId) return { replyBox: null, allReplies: [] };
-
-      const replyBox =
-        Array.from(document.querySelectorAll('.box')).find(b => b.querySelector('div[id^="r_"]')) || null;
-      if (!replyBox) return { replyBox: null, allReplies: [] };
-
-      let loadingBar = null;
-      if (CFG.threadTree.showLoadingBar) {
-        loadingBar = document.createElement('div');
-        loadingBar.id = 'v2ex-loading-bar';
-        loadingBar.innerText = '加载中...';
-        replyBox.parentNode.insertBefore(loadingBar, replyBox);
-      }
-
-      const totalPages = getTotalPages();
-      const currentP = new URLSearchParams(location.search).get('p');
-      const currentPage = currentP ? (parseInt(currentP, 10) || 1) : 1;
-
-      // 先取本页
-      let allReplies = extractRepliesFromDoc(document);
-
-      // 再抓其它页（并发限制）
+      // 拉取其它页
       if (totalPages > 1) {
-        const pages = [];
+        const currentP = parseInt(new URLSearchParams(location.search).get('p') || '1', 10);
+        const fetchPromises = [];
         for (let p = 1; p <= totalPages; p++) {
-          if (p === currentPage) continue;
-          pages.push(p);
+          if (p === currentP) continue;
+          fetchPromises.push(
+            fetch(`${location.pathname}?p=${p}`)
+              .then(res => res.text())
+              .then(html => {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                return extractRepliesFromDoc(doc);
+              })
+              .catch(() => [])
+          );
         }
-
-        let done = 0;
-        const results = await mapLimit(pages, CFG.threadTree.fetchConcurrency, async (p) => {
-          try {
-            if (loadingBar) loadingBar.innerText = `加载中...（${done}/${pages.length}）`;
-            const html = await fetchText(`${location.pathname}?p=${p}`);
-            const doc = parseHtml(html);
-            return extractRepliesFromDoc(doc);
-          } finally {
-            done++;
-            if (loadingBar) loadingBar.innerText = `加载中...（${done}/${pages.length}）`;
-          }
-        });
-
-        for (const list of results) allReplies = allReplies.concat(list);
+        const otherPagesReplies = await Promise.all(fetchPromises);
+        otherPagesReplies.forEach(list => { allReplies = allReplies.concat(list); });
       }
 
-      // 排序、清理分页、渲染树
+      // 排序 + 移除分页
       allReplies.sort((a, b) => a.floor - b.floor);
-      cleanupPagination();
+      document.querySelectorAll('.page_input, .page_current, .page_normal')
+        .forEach(el => el.closest('div')?.remove());
+
       renderTree(allReplies, replyBox);
       handleReadStatus(topicId, allReplies);
 
-      if (loadingBar) loadingBar.remove();
-
-      return { replyBox, allReplies };
+      loadingBar.remove();
+      document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
     }
 
-    return { init };
+    function boot() { init().catch(err => log('ThreadTree error:', err)); }
+    return { boot };
   })();
 
   // =========================
-  // 3) Base64 自动解码（仅帖子页）
-  // =========================
-  const Base64Decoder = (() => {
-    const B64_RE = /(^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-]{16,}={0,2})(?=[^A-Za-z0-9+/_-]|$)/g;
-
-    function normalizeBase64(s) {
-      let x = s.replace(/-/g, '+').replace(/_/g, '/').trim();
-      const pad = x.length % 4;
-      if (pad) x += '='.repeat(4 - pad);
-      return x;
-    }
-
-    function tryDecodeBase64(raw) {
-      if (!raw || raw.length < 16 || raw.length > CFG.base64.MAX_LEN) return null;
-
-      const norm = normalizeBase64(raw);
-      let bin;
-      try { bin = atob(norm); } catch { return null; }
-
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-
-      const bad = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
-      if (bad > 0) return null;
-
-      if (CFG.base64.URL_ONLY) {
-        if (text.includes('://')) return text;
-        return null;
-      }
-
-      if (!text.trim()) return null;
-      return text;
-    }
-
-    function makeBadge(raw, decoded) {
-      const wrap = document.createElement('span');
-      wrap.className = 'v2-b64-badge';
-      wrap.title = `base64: ${raw}`;
-
-      const label = document.createElement('span');
-      label.className = 'v2-b64-text';
-      label.textContent = decoded;
-      wrap.appendChild(label);
-
-      const btnCopy = document.createElement('button');
-      btnCopy.className = 'v2-b64-btn';
-      btnCopy.textContent = '复制';
-      btnCopy.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        GM_setClipboard(decoded);
-        btnCopy.textContent = '已复制';
-        setTimeout(() => (btnCopy.textContent = '复制'), 900);
-      });
-      wrap.appendChild(btnCopy);
-
-      if (decoded.includes('://')) {
-        const a = document.createElement('a');
-        a.className = 'v2-b64-link';
-        a.textContent = '打开';
-        a.href = decoded;
-        a.target = '_blank';
-        a.rel = 'noreferrer noopener';
-        wrap.appendChild(a);
-      }
-
-      return wrap;
-    }
-
-    function shouldSkipTextNode(node) {
-      if (!node || !node.parentElement) return true;
-      const p = node.parentElement;
-      if (!node.nodeValue || node.nodeValue.length < 16) return true;
-      if (CFG.base64.SKIP_IN_LINK && p.closest('a')) return true;
-      if (p.closest('.v2-b64-badge')) return true;
-      return false;
-    }
-
-    function processTextNode(node) {
-      const text = node.nodeValue;
-      B64_RE.lastIndex = 0;
-
-      let m, last = 0;
-      let changed = false;
-      const frag = document.createDocumentFragment();
-
-      while ((m = B64_RE.exec(text)) !== null) {
-        const prefix = m[1] || '';
-        const raw = m[2];
-        const decoded = tryDecodeBase64(raw);
-        if (!decoded) continue;
-
-        changed = true;
-        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-        if (prefix) frag.appendChild(document.createTextNode(prefix));
-        frag.appendChild(makeBadge(raw, decoded));
-
-        last = m.index + prefix.length + raw.length;
-      }
-
-      if (!changed) return;
-      frag.appendChild(document.createTextNode(text.slice(last)));
-      node.parentNode.replaceChild(frag, node);
-    }
-
-    function scanElement(el) {
-      if (!el || el.nodeType !== 1) return;
-      if (el.dataset.v2b64scanned === '1') return;
-
-      const walker = document.createTreeWalker(
-        el,
-        NodeFilter.SHOW_TEXT,
-        {
-          acceptNode: (node) => (shouldSkipTextNode(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
-        }
-      );
-
-      const nodes = [];
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-      nodes.forEach(processTextNode);
-
-      el.dataset.v2b64scanned = '1';
-    }
-
-    function scanAll() {
-      for (const sel of CFG.base64.TARGET_SELECTORS) {
-        document.querySelectorAll(sel).forEach(scanElement);
-      }
-    }
-
-    function startObserver() {
-      if (!CFG.base64.observeDom) return;
-
-      let scheduled = false;
-      const scheduleScan = () => {
-        if (scheduled) return;
-        scheduled = true;
-        setTimeout(() => {
-          scheduled = false;
-          scanAll();
-        }, 50);
-      };
-
-      const observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-          if (m.type === 'childList' && (m.addedNodes?.length || m.removedNodes?.length)) {
-            scheduleScan();
-            break;
-          }
-          if (m.type === 'characterData') {
-            scheduleScan();
-            break;
-          }
-        }
-      });
-
-      const root = document.querySelector('#Main') || document.body;
-      observer.observe(root, { childList: true, subtree: true, characterData: true });
-    }
-
-    function init() {
-      if (!CFG.base64.enabled) return;
-      scanAll();
-      startObserver();
-    }
-
-    return { init, scanAll };
-  })();
-
-  // =========================
-  // 4) 高赞回复阅览室（仅帖子页）
+  // 5) 功能D：高赞回复阅览室
   // =========================
   const HotRoom = (() => {
     function extractComments() {
       const comments = [];
       const cells = document.querySelectorAll('.cell[id^="r_"]');
-
       cells.forEach((cell) => {
         try {
           const smallFades = cell.querySelectorAll('.small.fade');
@@ -905,12 +793,12 @@
 
           for (const span of smallFades) {
             const text = span.innerText || '';
-            const m = text.match(/(?:♥|❤️)\s*(\d+)/);
-            if (m) { likes = parseInt(m[1], 10) || 0; break; }
+            const m1 = text.match(/(?:♥|❤️)\s*(\d+)/);
+            if (m1) { likes = parseInt(m1[1], 10); break; }
 
             const heartImg = span.querySelector('img[alt="❤️"]');
             if (heartImg && text.trim().length > 0) {
-              likes = parseInt(text.trim(), 10) || 0;
+              likes = parseInt(text.trim(), 10);
               break;
             }
           }
@@ -927,7 +815,7 @@
               floor: cell.querySelector('.no')?.innerText || '#',
             });
           }
-        } catch (e) {}
+        } catch (_) {}
       });
 
       return comments.sort((a, b) => b.likes - a.likes);
@@ -940,74 +828,104 @@
       const overlay = document.createElement('div');
       overlay.id = 'hot-overlay';
 
-      let cardsHtml = '';
-      comments.forEach((c, index) => {
-        let rankClass = 'rank-normal';
-        if (index === 0) rankClass = 'rank-1';
-        else if (index === 1) rankClass = 'rank-2';
-        else if (index === 2) rankClass = 'rank-3';
+      const container = document.createElement('div');
+      container.className = 'hot-container';
 
-        cardsHtml += `
-          <div class="hot-card ${rankClass}">
-            <div class="card-header-row">
-              <img src="${c.avatar}" class="user-avatar">
-              <a href="${c.userUrl}" target="_blank" class="user-name">${c.username}</a>
-              <div class="floor-tag" data-jump="${c.id}" title="跳转">${c.floor}</div>
-              <span class="time-tag">${c.time}</span>
-              <div class="likes-pill">♥ ${c.likes}</div>
-            </div>
-            <div class="card-content">${c.contentHtml}</div>
-          </div>
-        `;
-      });
+      if (!comments.length) {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'text-align:center;padding:40px;color:#ccc;font-size:13px;';
+        empty.textContent = '暂无高赞回复';
+        container.appendChild(empty);
+      } else {
+        comments.forEach((c, index) => {
+          let rankClass = 'rank-normal';
+          if (index === 0) rankClass = 'rank-1';
+          else if (index === 1) rankClass = 'rank-2';
+          else if (index === 2) rankClass = 'rank-3';
 
-      if (comments.length === 0) {
-        cardsHtml = `<div style="text-align:center;padding:40px;color:#ccc;font-size:13px;">暂无高赞回复</div>`;
+          const card = document.createElement('div');
+          card.className = `hot-card ${rankClass}`;
+
+          const header = document.createElement('div');
+          header.className = 'card-header-row';
+
+          const avatar = document.createElement('img');
+          avatar.className = 'user-avatar';
+          avatar.src = c.avatar;
+          header.appendChild(avatar);
+
+          const user = document.createElement('a');
+          user.className = 'user-name';
+          user.href = c.userUrl;
+          user.target = '_blank';
+          user.rel = 'noreferrer noopener';
+          user.textContent = c.username;
+          header.appendChild(user);
+
+          const floor = document.createElement('div');
+          floor.className = 'floor-tag';
+          floor.title = '跳转';
+          floor.textContent = c.floor;
+          floor.addEventListener('click', () => {
+            closeOverlay(overlay);
+            setTimeout(() => {
+              const el = document.getElementById(c.id);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 250);
+          });
+          header.appendChild(floor);
+
+          const time = document.createElement('span');
+          time.className = 'time-tag';
+          time.textContent = c.time;
+          header.appendChild(time);
+
+          const likes = document.createElement('div');
+          likes.className = 'likes-pill';
+          likes.textContent = `♥ ${c.likes}`;
+          header.appendChild(likes);
+
+          const content = document.createElement('div');
+          content.className = 'card-content';
+          content.innerHTML = c.contentHtml;
+
+          card.appendChild(header);
+          card.appendChild(content);
+          container.appendChild(card);
+        });
       }
 
-      overlay.innerHTML = `<div class="hot-container">${cardsHtml}</div>`;
+      overlay.appendChild(container);
       document.body.appendChild(overlay);
-
-      const close = () => {
-        overlay.classList.remove('active');
-        setTimeout(() => {
-          if (!overlay.classList.contains('active')) overlay.remove();
-        }, 200);
-      };
 
       // 点击背景关闭
       overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) close();
+        if (e.target === overlay) closeOverlay(overlay);
       });
 
-      // 点击楼层跳转
-      overlay.addEventListener('click', (e) => {
-        const t = e.target;
-        if (!(t instanceof HTMLElement)) return;
-        const id = t.getAttribute('data-jump');
-        if (!id) return;
-
-        overlay.classList.remove('active');
-        setTimeout(() => {
-          const el = document.getElementById(id);
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }, 250);
-      });
-
-      // ESC 关闭（用 addEventListener，不覆盖别人）
+      // ESC 关闭
       const onKey = (e) => {
-        if (e.key === 'Escape') {
-          close();
-          window.removeEventListener('keydown', onKey, true);
-        }
+        if (e.key === 'Escape') closeOverlay(overlay);
       };
-      window.addEventListener('keydown', onKey, true);
+      document.addEventListener('keydown', onKey);
 
+      overlay._cleanup = () => document.removeEventListener('keydown', onKey);
       return overlay;
     }
 
+    function closeOverlay(overlay) {
+      if (!overlay) return;
+      overlay.classList.remove('active');
+      setTimeout(() => {
+        if (!overlay.classList.contains('active')) {
+          overlay._cleanup?.();
+          overlay.remove();
+        }
+      }, 200);
+    }
+
     function initButton() {
-      if (!CFG.hot.enabled) return;
+      if (!isTopicPage()) return;
 
       const topicHeader = document.querySelector('#Main .header h1');
       const boxHeader = document.querySelector('#Main .box .header');
@@ -1027,54 +945,26 @@
       }
     }
 
-    function init() {
-      // 让页面先稳定一点（尤其是楼层树重排后）
+    function boot() {
+      if (!isTopicPage()) return;
       setTimeout(initButton, 500);
     }
 
-    return { init };
+    return { boot };
   })();
 
   // =========================
-  // 主流程：按“协同顺序”执行
+  // 6) 启动顺序（协同关键）
   // =========================
-  async function main() {
-    // A) 全站自动签到（不阻塞其它功能）
-    Daily.run();
+  Daily.boot();
 
-    if (!isTopicPage) return;
-
-    // B) 等待主体区域出现
-    const mainEl = await waitForSelector('#Main');
-    if (!mainEl) return;
-
-    // C) 楼层树重排（可能异步抓多页）
-    if (CFG.threadTree.enabled) {
-      try {
-        await ThreadTree.init();
-      } catch (e) {
-        log('ThreadTree error:', e);
-      }
-    }
-
-    // D) Base64 解码（重排完成后扫一次，并挂 observer 兼容后续 DOM 变更）
-    if (CFG.base64.enabled) {
-      try {
-        Base64Decoder.init();
-      } catch (e) {
-        log('Base64 error:', e);
-      }
-    }
-
-    // E) 高赞阅览室（基于“当前 DOM”，因此放在重排之后）
-    if (CFG.hot.enabled) {
-      try {
-        HotRoom.init();
-      } catch (e) {
-        log('HotRoom error:', e);
-      }
-    }
+  // 下面这些只在主题页跑
+  if (isTopicPage()) {
+    // 先建树（会大量改 DOM）
+    ThreadTree.boot();
+    // Base64 解码：有 observer，能接住“建树/多页插入”的变化
+    B64.boot();
+    // 高赞：依赖最终 DOM，稍后插按钮即可
+    HotRoom.boot();
   }
-
-  main();
 })();
