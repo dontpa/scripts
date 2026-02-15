@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.1
+// @version      2.0.2
 // @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码（含 URL 百分号编码场景，支持复制/打开）；每日自动签到；高赞回复阅览室。
 // @author       you
 // @match        https://v2ex.com/*
@@ -342,7 +342,7 @@
   })();
 
   // =========================
-  // 3) 功能B：Base64 自动解码（优化版，支持含Null字符的文本/URL）
+  // 3) 功能B：Base64 自动解码（增强防误报版）
   // =========================
   const B64 = (() => {
     const CFG = {
@@ -370,7 +370,7 @@
 
     function extractFirstUrl(s) {
       if (!s) return null;
-      // 允许提取可能被非法字符包裹的 URL
+      // 排除常见的控制字符，但允许 URL 常见字符
       const m = s.match(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>\x00-\x08\x0B\x0C\x0E-\x1F]+/);
       return m ? m[0] : null;
     }
@@ -388,32 +388,36 @@
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
-      // 解码
+      // 解码 UTF-8
       const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 
-      // 1. 先尝试移除控制字符（保留换行Tab等），解决 Thunder/Flash 链接问题
-      // Thunder 链接解码后通常前后会有 \x00 等字符
-      const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-
-      // 2. 如果原始内容和清理后的内容长度不一致（说明包含控制字符），
-      //    为了防止显示纯二进制乱码，我们要求清理后的内容必须包含一个 URL 或者是纯文本链接形式才允许显示。
-      //    或者，如果只是少量控制字符但整体是可读文本，也放行。
-      //    这里简化策略：如果有 Bad Chars，必须能提取出 URL，或者 URL_ONLY=false 且清理后不为空。
+      // --- 防误报核心逻辑 ---
       
-      const hadBad = text.length !== cleanText.length;
+      // 1. 乱码检测：UTF-8 解码失败会生成  (Replacement Character)
+      // 如果包含 ，通常意味着这根本不是合法的 UTF-8 文本（或者是二进制数据）
+      const hasReplacement = text.includes('\ufffd');
 
-      // 尝试提取 URL
+      // 2. 尝试提取 URL (允许 Thunder 等链接包含部分 Null 字符)
+      // 先去除控制字符再提取，防止正则失效
+      const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
       const url1 = extractFirstUrl(cleanText);
+
+      // 判定逻辑：
+      // A. 如果看起来像 URL，即使包含乱码/控制字符，也放行 (Thunder 链接常见情况)
       if (url1) return { display: url1, url: url1 };
 
-      // 如果有 Bad Chars 且没提取到 URL，视为二进制垃圾，丢弃
-      if (hadBad) return null;
+      // B. 如果不是 URL，且包含  (乱码)，则认为是 "s-ui+reality+vless" 这种误报，丢弃
+      if (hasReplacement) return null;
 
+      // C. 如果不是 URL，且包含大量控制字符 (非  但也是不可见字符)，丢弃
+      if (text.length !== cleanText.length) return null;
+
+      // D. 普通文本模式
       if (!CFG.URL_ONLY) {
         const t = cleanText.trim();
         if (!t) return null;
-        
-        // 尝试处理百分号编码
+
+        // 尝试处理百分号编码 (https%3A%2F%2F...)
         if (/%[0-9A-Fa-f]{2}/.test(t)) {
           const u = safeDecodeURIComponent(t);
           if (u) {
@@ -423,7 +427,7 @@
           }
         }
         
-        // 尝试处理 "前缀+URL" 形式
+        // 尝试处理 "前缀+URL"
         if (t.includes('://')) {
           const url3 = extractFirstUrl(t);
           if (url3) return { display: url3, url: url3 };
