@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.3
-// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码（含短文本，防误报机制）；每日自动签到；高赞回复阅览室。
+// @version      2.0.4
+// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码（含短文本，增强乱码及UUID/MD5防误报机制）；每日自动签到；高赞回复阅览室。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -342,7 +342,7 @@
   })();
 
   // =========================
-  // 3) 功能B：Base64 自动解码（大幅降低长度限制）
+  // 3) 功能B：Base64 自动解码 (v2.0.4 终极防误报过滤版)
   // =========================
   const B64 = (() => {
     const CFG = {
@@ -353,7 +353,6 @@
     };
 
     const SEP_RE = /[\s\u200b\u200c\u200d\uFEFF]/g;
-    // 将 {15,} 降为 {7,} -> 即最小基础字符只需 8 个 (约 6 个字节)
     const B64_RE = /(^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){7,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2}))(?=[^A-Za-z0-9+/_-]|$)/g;
 
     function normalizeBase64(s) {
@@ -378,11 +377,22 @@
     function tryDecodeBase64(raw) {
       if (!raw) return null;
       const cleaned = raw.replace(SEP_RE, '');
-      // 最小长度降低到 8 (匹配正则设定)
       if (cleaned.length < 8 || cleaned.length > CFG.MAX_LEN) return null;
 
-      const norm = normalizeBase64(cleaned);
+      // -------------------------------------------------------------
+      // 第一层拦截：形态学（剔除 MD5/UUID/纯英文单词）
+      // 真正的 Base64 大概率是大小写混合的，如果一段文本没有以 "=" 结尾，
+      // 且完全由纯 Hex（0-9, a-f）、或纯小写、或纯大写组成，极大概率是哈希值或单词，直接抛弃。
+      // -------------------------------------------------------------
+      if (!cleaned.endsWith('=')) {
+        const rawClean = cleaned.replace(/=+$/, '');
+        const rawAlphaNum = rawClean.replace(/[^A-Za-z0-9]/g, ''); // 去除连字符等看字母底色
+        if (/^[0-9a-f]+$/i.test(rawAlphaNum)) return null; 
+        if (/^[a-z]+$/.test(rawAlphaNum)) return null;
+        if (/^[A-Z]+$/.test(rawAlphaNum)) return null;
+      }
 
+      const norm = normalizeBase64(cleaned);
       let bin;
       try { bin = atob(norm); } catch { return null; }
 
@@ -392,15 +402,34 @@
       // 解码 UTF-8
       const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 
-      // --- 防误报核心逻辑 ---
       const hasReplacement = text.includes('\ufffd');
       const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+      
       const url1 = extractFirstUrl(cleanText);
-
       if (url1) return { display: url1, url: url1 };
+      
+      // 如果没提取到 URL，且存在完全无法解析的字节 / 控制字符，视为无效
       if (hasReplacement) return null;
       if (text.length !== cleanText.length) return null;
 
+      // -------------------------------------------------------------
+      // 第二层拦截：多语言乱码嗅探
+      // 字节错位拼凑出的“合法”UTF-8 极大概率落在 拉丁语补充/西里尔文/希腊文 区间。
+      // 如果包含这些带音标的奇怪符号，且整段文字连一个汉字都没有，那绝对是乱码误报。
+      // -------------------------------------------------------------
+      if (/[\u00C0-\u02FF\u0370-\u1FFF]/.test(cleanText) && !/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(cleanText)) {
+        return null;
+      }
+
+      // -------------------------------------------------------------
+      // 第三层拦截：无意义的纯符号堆砌
+      // 如果解码出的结果连一个正常的字母、数字或汉字都没有，视为乱码。
+      // -------------------------------------------------------------
+      if (!/[A-Za-z0-9\u4E00-\u9FFF]/.test(cleanText)) {
+        return null;
+      }
+
+      // 常规文本处理
       if (!CFG.URL_ONLY) {
         const t = cleanText.trim();
         if (!t) return null;
@@ -464,7 +493,6 @@
 
     function shouldSkipTextNode(node) {
       if (!node || !node.parentElement) return true;
-      // 降低排除门槛
       if (!node.nodeValue || node.nodeValue.length < 8) return true;
       const p = node.parentElement;
       if (p.closest('.v2-b64-badge')) return true;
