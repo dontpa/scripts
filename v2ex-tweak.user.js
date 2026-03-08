@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室）
+// @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室 + Imgur代理）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.4
-// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码（含短文本，增强乱码及UUID/MD5防误报机制）；每日自动签到；高赞回复阅览室。
+// @version      2.0.5
+// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -342,7 +342,7 @@
   })();
 
   // =========================
-  // 3) 功能B：Base64 自动解码 (v2.0.4 终极防误报过滤版)
+  // 3) 功能B：Base64 自动解码
   // =========================
   const B64 = (() => {
     const CFG = {
@@ -379,14 +379,9 @@
       const cleaned = raw.replace(SEP_RE, '');
       if (cleaned.length < 8 || cleaned.length > CFG.MAX_LEN) return null;
 
-      // -------------------------------------------------------------
-      // 第一层拦截：形态学（剔除 MD5/UUID/纯英文单词）
-      // 真正的 Base64 大概率是大小写混合的，如果一段文本没有以 "=" 结尾，
-      // 且完全由纯 Hex（0-9, a-f）、或纯小写、或纯大写组成，极大概率是哈希值或单词，直接抛弃。
-      // -------------------------------------------------------------
       if (!cleaned.endsWith('=')) {
         const rawClean = cleaned.replace(/=+$/, '');
-        const rawAlphaNum = rawClean.replace(/[^A-Za-z0-9]/g, ''); // 去除连字符等看字母底色
+        const rawAlphaNum = rawClean.replace(/[^A-Za-z0-9]/g, '');
         if (/^[0-9a-f]+$/i.test(rawAlphaNum)) return null; 
         if (/^[a-z]+$/.test(rawAlphaNum)) return null;
         if (/^[A-Z]+$/.test(rawAlphaNum)) return null;
@@ -399,37 +394,24 @@
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
-      // 解码 UTF-8
       const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-
       const hasReplacement = text.includes('\ufffd');
       const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
       
       const url1 = extractFirstUrl(cleanText);
       if (url1) return { display: url1, url: url1 };
       
-      // 如果没提取到 URL，且存在完全无法解析的字节 / 控制字符，视为无效
       if (hasReplacement) return null;
       if (text.length !== cleanText.length) return null;
 
-      // -------------------------------------------------------------
-      // 第二层拦截：多语言乱码嗅探
-      // 字节错位拼凑出的“合法”UTF-8 极大概率落在 拉丁语补充/西里尔文/希腊文 区间。
-      // 如果包含这些带音标的奇怪符号，且整段文字连一个汉字都没有，那绝对是乱码误报。
-      // -------------------------------------------------------------
       if (/[\u00C0-\u02FF\u0370-\u1FFF]/.test(cleanText) && !/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(cleanText)) {
         return null;
       }
 
-      // -------------------------------------------------------------
-      // 第三层拦截：无意义的纯符号堆砌
-      // 如果解码出的结果连一个正常的字母、数字或汉字都没有，视为乱码。
-      // -------------------------------------------------------------
       if (!/[A-Za-z0-9\u4E00-\u9FFF]/.test(cleanText)) {
         return null;
       }
 
-      // 常规文本处理
       if (!CFG.URL_ONLY) {
         const t = cleanText.trim();
         if (!t) return null;
@@ -957,7 +939,70 @@
   })();
 
   // =========================
-  // 6) 启动
+  // 6) 功能E：Imgur 图片代理 (DuckDuckGo Proxy)
+  // =========================
+  const ImgurProxy = (() => {
+    function processImage(img) {
+      const src = img.getAttribute('src');
+      if (!src) return;
+      
+      // 检查是否包含 imgur.com 且还没被代理过
+      if (src.includes('imgur.com') && !src.includes('external-content.duckduckgo.com')) {
+        // 补全协议 (有些图片可能以 // 开头)
+        let fullUrl = src;
+        if (src.startsWith('//')) {
+          fullUrl = 'https:' + src;
+        } else if (!src.startsWith('http')) {
+          fullUrl = 'https://' + src;
+        }
+
+        // 替换 src
+        const proxyUrl = `https://external-content.duckduckgo.com/iu/?u=${encodeURIComponent(fullUrl)}&f=1&nofb=1`;
+        img.setAttribute('src', proxyUrl);
+        img.dataset.proxied = '1';
+
+        // 顺带替换包裹在外层的 <a> 标签的 href (V2EX 经常会将大图用 a 标签包裹)
+        const parent = img.parentElement;
+        if (parent && parent.tagName.toLowerCase() === 'a') {
+          const href = parent.getAttribute('href');
+          if (href && href.includes('imgur.com') && !href.includes('external-content.duckduckgo.com')) {
+            let fullHref = href;
+            if (href.startsWith('//')) fullHref = 'https:' + href;
+            const proxyHref = `https://external-content.duckduckgo.com/iu/?u=${encodeURIComponent(fullHref)}&f=1&nofb=1`;
+            parent.setAttribute('href', proxyHref);
+          }
+        }
+      }
+    }
+
+    function scanAll() {
+      document.querySelectorAll('img[src*="imgur.com"]').forEach(processImage);
+    }
+
+    function boot() {
+      // 初次全量扫描
+      scanAll();
+
+      // 监听 DOM 变化 (兼容 ThreadTree 多页拉取及 HotRoom 高赞动态生成)
+      const observer = new MutationObserver((mutations) => {
+        let shouldScan = false;
+        for (const m of mutations) {
+          if (m.addedNodes && m.addedNodes.length > 0) {
+            shouldScan = true;
+            break;
+          }
+        }
+        if (shouldScan) scanAll();
+      });
+
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    return { boot };
+  })();
+
+  // =========================
+  // 7) 启动
   // =========================
   Daily.boot();
 
@@ -965,5 +1010,6 @@
     ThreadTree.boot();
     B64.boot();
     HotRoom.boot();
+    ImgurProxy.boot(); // 启动代理模块
   }
 })();
