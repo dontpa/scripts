@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室 + Imgur代理）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.5
+// @version      2.0.6
 // @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载。
 // @author       you
 // @match        https://v2ex.com/*
@@ -353,7 +353,9 @@
     };
 
     const SEP_RE = /[\s\u200b\u200c\u200d\uFEFF]/g;
+    const SEP_SPLIT_RE = /[\s\u200b\u200c\u200d\uFEFF]+/;
     const B64_RE = /(^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){7,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2}))(?=[^A-Za-z0-9+/_-]|$)/g;
+    const TRAILING_HINT_RE = /(?:[\s\u200b\u200c\u200d\uFEFF]+(?:base64|b64|decode|encoded?|编码|解码))+\s*$/i;
 
     function normalizeBase64(s) {
       let x = s.replace(/-/g, '+').replace(/_/g, '/').trim();
@@ -374,9 +376,38 @@
       return m ? m[0] : null;
     }
 
-    function tryDecodeBase64(raw) {
-      if (!raw) return null;
-      const cleaned = raw.replace(SEP_RE, '');
+    function getBase64Candidates(raw) {
+      if (!raw) return [];
+
+      const variants = [];
+      const seen = new Set();
+      const pushVariant = (value) => {
+        if (!value) return;
+        const cleaned = value.replace(SEP_RE, '');
+        if (!cleaned || seen.has(cleaned)) return;
+        seen.add(cleaned);
+        variants.push(cleaned);
+      };
+
+      const trimmed = raw.trim();
+      pushVariant(trimmed);
+
+      const stripped = trimmed.replace(TRAILING_HINT_RE, '').trim();
+      if (stripped && stripped !== trimmed) pushVariant(stripped);
+
+      const tokens = trimmed.split(SEP_SPLIT_RE).filter(Boolean);
+      if (tokens.length > 1) {
+        pushVariant(tokens.join(''));
+        for (let drop = 1; drop <= Math.min(4, tokens.length - 1); drop++) {
+          pushVariant(tokens.slice(0, -drop).join(''));
+        }
+      }
+
+      return variants;
+    }
+
+    function decodeBase64Candidate(cleaned) {
+      if (!cleaned) return null;
       if (cleaned.length < 8 || cleaned.length > CFG.MAX_LEN) return null;
 
       if (!cleaned.endsWith('=')) {
@@ -397,12 +428,69 @@
       const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
       const hasReplacement = text.includes('\ufffd');
       const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-      
-      const url1 = extractFirstUrl(cleanText);
+
+      return {
+        cleanText,
+        hasReplacement,
+        hasControlChars: text.length !== cleanText.length,
+        url: extractFirstUrl(cleanText),
+      };
+    }
+
+    function scoreDecodedCandidate(candidate) {
+      if (!candidate) return -Infinity;
+
+      const trimmed = candidate.cleanText.trim();
+      if (!trimmed) return -Infinity;
+
+      let score = 0;
+      if (candidate.url) score += 100;
+      if (!candidate.hasReplacement) score += 40;
+      if (!candidate.hasControlChars) score += 20;
+      if (candidate.url && trimmed === candidate.url) score += 20;
+
+      if (candidate.url && trimmed.startsWith(candidate.url)) {
+        const suffix = trimmed.slice(candidate.url.length).trim();
+        if (!suffix) {
+          score += 10;
+        } else if (!/^[)\],.!?:;'"`]+$/.test(suffix)) {
+          score -= 30;
+        }
+      }
+
+      if (/[\u00C0-\u02FF\u0370-\u1FFF]/.test(candidate.cleanText) && !/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(candidate.cleanText)) {
+        score -= 60;
+      }
+
+      if (!/[A-Za-z0-9\u4E00-\u9FFF]/.test(trimmed)) {
+        score -= 40;
+      }
+
+      return score;
+    }
+
+    function tryDecodeBase64(raw) {
+      if (!raw) return null;
+
+      let best = null;
+      let bestScore = -Infinity;
+
+      for (const cleaned of getBase64Candidates(raw)) {
+        const candidate = decodeBase64Candidate(cleaned);
+        const score = scoreDecodedCandidate(candidate);
+        if (score > bestScore) {
+          best = candidate;
+          bestScore = score;
+        }
+      }
+
+      if (!best) return null;
+      if (best.hasReplacement) return null;
+      if (best.hasControlChars) return null;
+
+      const cleanText = best.cleanText;
+      const url1 = best.url;
       if (url1) return { display: url1, url: url1 };
-      
-      if (hasReplacement) return null;
-      if (text.length !== cleanText.length) return null;
 
       if (/[\u00C0-\u02FF\u0370-\u1FFF]/.test(cleanText) && !/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(cleanText)) {
         return null;
