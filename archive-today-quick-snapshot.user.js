@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         Archive Today — Quick Snapshot
 // @namespace    https://archive.today/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Send the current page URL to archive.today and jump to its latest snapshot.
 // @author       You
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
-// @grant        GM_openInTab
 // @connect      archive.today
 // @connect      archive.ph
 // @run-at       document-idle
@@ -16,7 +15,7 @@
   "use strict";
 
   // ─── Config ───────────────────────────────────────────────────────────────
-  const ARCHIVE_HOST = "https://archive.today";   // also works with archive.ph / archive.is
+  const ARCHIVE_HOST = "https://archive.today";
   const BTN_ID       = "__archive_today_btn__";
   const STYLE_ID     = "__archive_today_style__";
 
@@ -28,29 +27,28 @@
     style.textContent = `
       #${BTN_ID} {
         position: fixed;
-        bottom: 24px;
-        right: 24px;
+        bottom: 16px;
+        right: 16px;
         z-index: 2147483647;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 9px 14px;
+        width: 32px;
+        height: 32px;
+        padding: 0;
         background: #1a1a1a;
         color: #f0f0f0;
-        font: 600 13px/1 system-ui, sans-serif;
+        font-size: 16px;
+        line-height: 1;
         border: none;
-        border-radius: 8px;
-        box-shadow: 0 4px 14px rgba(0,0,0,.35);
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(0,0,0,.4);
         cursor: pointer;
         transition: background .15s, transform .1s, opacity .2s;
-        text-decoration: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
       #${BTN_ID}:hover   { background: #333; transform: translateY(-1px); }
       #${BTN_ID}:active  { transform: translateY(0); }
-      #${BTN_ID}.loading { opacity: .7; pointer-events: none; }
-      #${BTN_ID} .icon   { font-size: 15px; }
-      #${BTN_ID} .label  { letter-spacing: .2px; }
-      #${BTN_ID} .status { font-size: 11px; opacity: .75; }
+      #${BTN_ID}.loading { opacity: .5; pointer-events: none; }
     `;
     document.head.appendChild(style);
   }
@@ -58,82 +56,70 @@
   // ─── Create floating button ───────────────────────────────────────────────
   function createButton() {
     if (document.getElementById(BTN_ID)) return;
-
     const btn = document.createElement("button");
     btn.id = BTN_ID;
-    btn.innerHTML = `<span class="icon">🗃️</span><span class="label">Archive</span>`;
-    btn.title = "Send to archive.today and open the latest snapshot";
+    btn.textContent = "🗃";
+    btn.title = "Archive this page on archive.today";
     btn.addEventListener("click", handleClick);
     document.body.appendChild(btn);
   }
 
-  // ─── State helpers ────────────────────────────────────────────────────────
-  function setStatus(text, loading = false) {
+  function setLoading(on) {
     const btn = document.getElementById(BTN_ID);
-    if (!btn) return;
-    btn.innerHTML = `<span class="icon">🗃️</span><span class="label">Archive</span><span class="status">${text}</span>`;
-    btn.classList.toggle("loading", loading);
+    if (btn) btn.classList.toggle("loading", on);
   }
 
-  function resetButton() {
-    const btn = document.getElementById(BTN_ID);
-    if (!btn) return;
-    btn.innerHTML = `<span class="icon">🗃️</span><span class="label">Archive</span>`;
-    btn.classList.remove("loading");
+  // ─── Navigate a tab reference to a URL ───────────────────────────────────
+  // `tabRef` is the object returned by window.open() — kept alive from the
+  // synchronous part of the click handler so Mobile Safari doesn't block it.
+  function navigateTo(tabRef, url) {
+    if (tabRef && !tabRef.closed) {
+      tabRef.location.href = url;
+    } else {
+      // Fallback: if the reference was lost, try a plain window.open
+      window.open(url, "_blank");
+    }
   }
 
   // ─── Core logic ───────────────────────────────────────────────────────────
   function handleClick() {
     const pageUrl = window.location.href;
 
-    // First, try to fetch the newest existing snapshot.
-    // archive.today/newest/<url> redirects to the latest snapshot if one exists,
-    // or returns a 404 / redirect to the submit page if none exists.
-    const newestUrl = `${ARCHIVE_HOST}/newest/${pageUrl}`;
+    // ↓ CRITICAL FOR MOBILE SAFARI ↓
+    // window.open() must be called synchronously inside the user-gesture handler.
+    // Any call made inside an async callback (XHR onload, setTimeout, Promise)
+    // is treated as a popup by iOS Safari and silently blocked.
+    // We open a blank tab NOW, then steer it to the right URL once we know it.
+    const newTab = window.open("", "_blank");
 
-    setStatus("Checking…", true);
+    setLoading(true);
+
+    const newestUrl = `${ARCHIVE_HOST}/newest/${pageUrl}`;
 
     GM_xmlhttpRequest({
       method: "GET",
       url: newestUrl,
-      // Follow redirects so we land on the actual snapshot URL (or submit page).
-      // Most userscript engines expose the final URL via response.finalUrl.
       onload(response) {
         const finalUrl = response.finalUrl || response.responseURL || newestUrl;
-
-        // If archive.today redirected us to a real snapshot, open it.
-        // Snapshots have the form: https://archive.today/<hash>
-        const isSnapshot = /archive\.(today|ph|is|fo|li)\/[a-zA-Z0-9]{4,}/.test(finalUrl) &&
-                           !finalUrl.includes("/submit") &&
-                           !finalUrl.includes("/newest");
+        const isSnapshot =
+          /archive\.(today|ph|is|fo|li)\/[a-zA-Z0-9]{4,}/.test(finalUrl) &&
+          !finalUrl.includes("/submit") &&
+          !finalUrl.includes("/newest");
 
         if (response.status === 200 && isSnapshot) {
-          setStatus("Opening…", true);
-          GM_openInTab(finalUrl, { active: true });
-          setTimeout(resetButton, 1500);
+          navigateTo(newTab, finalUrl);
+          setLoading(false);
         } else {
-          // No snapshot yet — submit the page for archiving.
-          submitAndRedirect(pageUrl);
+          submitAndRedirect(pageUrl, newTab);
         }
       },
       onerror() {
-        // Network error or blocked — fall back to a direct submit redirect.
-        submitAndRedirect(pageUrl);
+        submitAndRedirect(pageUrl, newTab);
       },
     });
   }
 
-  /**
-   * Submit the URL to archive.today for archiving.
-   * archive.today will save the page and then redirect to the new snapshot.
-   * We open the submit URL directly; archive.today will redirect the user
-   * to the freshly-created snapshot automatically.
-   */
-  function submitAndRedirect(pageUrl) {
-    setStatus("Submitting…", true);
-
-    // POST to archive.today/submit/ with the target URL.
-    // We open the submit page in a new tab so the redirect lands there.
+  function submitAndRedirect(pageUrl, newTab) {
     const submitUrl = `${ARCHIVE_HOST}/submit/`;
 
     GM_xmlhttpRequest({
@@ -142,26 +128,22 @@
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       data: `url=${encodeURIComponent(pageUrl)}&anyway=1`,
       onload(response) {
-        // archive.today returns a "Refresh" header or redirects to the snapshot.
         const snapshotUrl = response.finalUrl || response.responseURL;
-
-        const isSnapshot = snapshotUrl &&
+        const isSnapshot =
+          snapshotUrl &&
           /archive\.(today|ph|is|fo|li)\/[a-zA-Z0-9]{4,}/.test(snapshotUrl) &&
           !snapshotUrl.includes("/submit");
 
-        if (isSnapshot) {
-          GM_openInTab(snapshotUrl, { active: true });
-        } else {
-          // Fallback: open the submit page directly in a new tab so the user
-          // can watch the archiving progress and land on the snapshot.
-          GM_openInTab(`${submitUrl}?url=${encodeURIComponent(pageUrl)}`, { active: true });
-        }
-        setTimeout(resetButton, 1500);
+        const dest = isSnapshot
+          ? snapshotUrl
+          : `${submitUrl}?url=${encodeURIComponent(pageUrl)}`;
+
+        navigateTo(newTab, dest);
+        setLoading(false);
       },
       onerror() {
-        // Last resort: just open the submit page in a new tab.
-        GM_openInTab(`${ARCHIVE_HOST}/submit/?url=${encodeURIComponent(pageUrl)}`, { active: true });
-        setTimeout(resetButton, 1500);
+        navigateTo(newTab, `${ARCHIVE_HOST}/submit/?url=${encodeURIComponent(pageUrl)}`);
+        setLoading(false);
       },
     });
   }
