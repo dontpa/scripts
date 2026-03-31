@@ -1,10 +1,15 @@
 // ==UserScript==
 // @name         Archive Today — Quick Snapshot
 // @namespace    https://archive.today/
-// @version      1.1.0
-// @description  Send the current page URL to archive.today and jump to its latest snapshot.
+// @version      1.2.0
+// @description  Send the current page URL to archive.today and navigate to its latest snapshot.
 // @author       You
 // @match        *://*/*
+// @exclude      *://archive.today/*
+// @exclude      *://archive.ph/*
+// @exclude      *://archive.is/*
+// @exclude      *://archive.fo/*
+// @exclude      *://archive.li/*
 // @grant        GM_xmlhttpRequest
 // @connect      archive.today
 // @connect      archive.ph
@@ -69,57 +74,43 @@
     if (btn) btn.classList.toggle("loading", on);
   }
 
-  // ─── Navigate a tab reference to a URL ───────────────────────────────────
-  // `tabRef` is the object returned by window.open() — kept alive from the
-  // synchronous part of the click handler so Mobile Safari doesn't block it.
-  function navigateTo(tabRef, url) {
-    if (tabRef && !tabRef.closed) {
-      tabRef.location.href = url;
-    } else {
-      // Fallback: if the reference was lost, try a plain window.open
-      window.open(url, "_blank");
-    }
+  // ─── Navigate current tab ─────────────────────────────────────────────────
+  // Since we're staying in the same tab, no popup-blocker concerns at all.
+  // Just set window.location.href directly — works on every platform.
+  function navigateTo(url) {
+    window.location.href = url;
   }
 
   // ─── Core logic ───────────────────────────────────────────────────────────
   function handleClick() {
+    // Capture the page URL now — once we navigate away it'll be gone.
     const pageUrl = window.location.href;
-
-    // ↓ CRITICAL FOR MOBILE SAFARI ↓
-    // window.open() must be called synchronously inside the user-gesture handler.
-    // Any call made inside an async callback (XHR onload, setTimeout, Promise)
-    // is treated as a popup by iOS Safari and silently blocked.
-    // We open a blank tab NOW, then steer it to the right URL once we know it.
-    const newTab = window.open("", "_blank");
 
     setLoading(true);
 
-    const newestUrl = `${ARCHIVE_HOST}/newest/${pageUrl}`;
-
     GM_xmlhttpRequest({
       method: "GET",
-      url: newestUrl,
+      url: `${ARCHIVE_HOST}/newest/${pageUrl}`,
       onload(response) {
-        const finalUrl = response.finalUrl || response.responseURL || newestUrl;
+        const finalUrl = response.finalUrl || response.responseURL || "";
         const isSnapshot =
           /archive\.(today|ph|is|fo|li)\/[a-zA-Z0-9]{4,}/.test(finalUrl) &&
           !finalUrl.includes("/submit") &&
           !finalUrl.includes("/newest");
 
         if (response.status === 200 && isSnapshot) {
-          navigateTo(newTab, finalUrl);
-          setLoading(false);
+          navigateTo(finalUrl);
         } else {
-          submitAndRedirect(pageUrl, newTab);
+          submitAndNavigate(pageUrl);
         }
       },
       onerror() {
-        submitAndRedirect(pageUrl, newTab);
+        submitAndNavigate(pageUrl);
       },
     });
   }
 
-  function submitAndRedirect(pageUrl, newTab) {
+  function submitAndNavigate(pageUrl) {
     const submitUrl = `${ARCHIVE_HOST}/submit/`;
 
     GM_xmlhttpRequest({
@@ -128,22 +119,18 @@
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       data: `url=${encodeURIComponent(pageUrl)}&anyway=1`,
       onload(response) {
-        const snapshotUrl = response.finalUrl || response.responseURL;
+        const snapshotUrl = response.finalUrl || response.responseURL || "";
         const isSnapshot =
-          snapshotUrl &&
           /archive\.(today|ph|is|fo|li)\/[a-zA-Z0-9]{4,}/.test(snapshotUrl) &&
           !snapshotUrl.includes("/submit");
 
-        const dest = isSnapshot
+        navigateTo(isSnapshot
           ? snapshotUrl
-          : `${submitUrl}?url=${encodeURIComponent(pageUrl)}`;
-
-        navigateTo(newTab, dest);
-        setLoading(false);
+          : `${submitUrl}?url=${encodeURIComponent(pageUrl)}`
+        );
       },
       onerror() {
-        navigateTo(newTab, `${ARCHIVE_HOST}/submit/?url=${encodeURIComponent(pageUrl)}`);
-        setLoading(false);
+        navigateTo(`${ARCHIVE_HOST}/submit/?url=${encodeURIComponent(pageUrl)}`);
       },
     });
   }
