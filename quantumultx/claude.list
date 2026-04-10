@@ -1,0 +1,17 @@
+host-suffix, anthropic.com, proxy
+host-suffix, clau.de, proxy
+host-suffix, claude.ai, proxy
+host-suffix, claude.com, proxy
+host-suffix, claudemcpclient.com, proxy
+host-suffix, claudeusercontent.com, proxy
+host-suffix, cdn.anthropic.com, proxy
+host-suffix, anthropic.com.cdn.cloudflare.net, proxy
+host-suffix, servd-anthropic-website.b-cdn.net, proxy
+host-suffix, anthropic.auth0.com, proxy
+host-suffix, anthropic-com.ghost.io, proxy
+host-suffix, sentry.io, proxy
+host-suffix, statsigapi.net, proxy
+host-keyword, anthropic, proxy
+host-keyword, datadog, proxy
+host-keyword, sentry, proxy
+host-keyword, sift, proxy
