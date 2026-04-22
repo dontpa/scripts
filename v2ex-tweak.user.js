@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室 + Imgur代理）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.7
+// @version      2.0.8
 // @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载。
 // @author       you
 // @match        https://v2ex.com/*
@@ -74,11 +74,19 @@
     .reply-wrapper > .cell:hover { background-color: var(--bg-hover); }
 
     .reply-wrapper .avatar {
+      display: block;
       width: 36px !important;
+      min-width: 36px !important;
+      max-width: 36px !important;
       height: 36px !important;
-      border-radius: 4px;
+      min-height: 36px !important;
+      max-height: 36px !important;
+      aspect-ratio: 1 / 1;
       object-fit: cover;
-      aspect-ratio: 1;
+      flex: none;
+      max-inline-size: none !important;
+      border-radius: 4px;
+      margin: 0 auto;
     }
     .reply_content {
       font-size: 14px;
@@ -205,7 +213,21 @@
       margin-bottom: 6px;
       font-size: 12px;
     }
-    .user-avatar { width: 18px; height: 18px; border-radius: 3px; margin-right: 8px; }
+    .user-avatar {
+      display: block;
+      width: 18px;
+      min-width: 18px;
+      max-width: 18px;
+      height: 18px;
+      min-height: 18px;
+      max-height: 18px;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      flex: none;
+      max-inline-size: none;
+      border-radius: 3px;
+      margin-right: 8px;
+    }
     .user-name { font-weight: 600; color: #444; text-decoration: none; margin-right: 8px; }
 
     .floor-tag {
