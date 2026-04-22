@@ -533,7 +533,8 @@
   // 4) 功能C：楼层树 + 多页加载
   // =========================
   const ThreadTree = (() => {
-    function parseReplyCell(cell) {
+    // 采用 V2EX_Polish 的楼层识别逻辑
+    function parseReplyCell(cell, idx) {
       if (!cell || !cell.id || !cell.id.startsWith('r_')) return null;
 
       const replyId = cell.id.replace('r_', '');
@@ -544,53 +545,87 @@
 
       if (!contentEl || !authorEl || !floorEl) return null;
 
-      const mentionUsers = Array.from(contentEl.querySelectorAll('a[href^="/member/"]'))
-        .map(a => (a.getAttribute('href') || '').split('/').pop())
-        .filter(Boolean);
+      const memberName = authorEl.innerText;
+      const memberLink = authorEl.href;
+      const memberAvatar = avatarEl ? avatarEl.src : '';
+      const content = contentEl.innerText;
+      const floor = floorEl.innerText;
+      const floorNum = parseInt(floor, 10);
+      const likes = parseInt(cell.querySelector('span.small')?.innerText || '0', 10);
 
-      const plainMentions = (contentEl.innerText.match(/@([A-Za-z0-9_]+)/g) || []).map(s => s.slice(1));
-      const allMentions = Array.from(new Set([...mentionUsers, ...plainMentions]));
+      // 提取引用的用户名（@username）
+      const memberNameMatches = Array.from(content.matchAll(/@([a-zA-Z0-9]+)/g));
+      const refMemberNames = memberNameMatches.length > 0
+        ? memberNameMatches.map(([, name]) => name)
+        : undefined;
+
+      // 提取引用的楼层号（#123）
+      const floorMatches = Array.from(content.matchAll(/#(\d+)/g));
+      const refFloors = floorMatches.length > 0
+        ? floorMatches.map(([, f]) => f)
+        : undefined;
 
       return {
         element: cell,
         id: replyId,
-        author: authorEl.innerText,
-        floor: parseInt(floorEl.innerText, 10),
-        contentHtml: contentEl.innerHTML,
-        textContent: contentEl.innerText,
-        avatar: avatarEl ? avatarEl.src : '',
-        mentions: allMentions,
+        index: idx,
+        memberName,
+        memberLink,
+        memberAvatar,
+        content,
+        floor,
+        floorNum,
+        likes,
+        refMemberNames,
+        refFloors,
         children: [],
       };
     }
 
     function extractRepliesFromDoc(doc) {
       const cells = Array.from(doc.querySelectorAll('div.cell[id^="r_"]'));
-      return cells.map(parseReplyCell).filter(Boolean);
+      return cells.map((cell, idx) => parseReplyCell(cell, idx)).filter(Boolean);
     }
 
+    // 采用 V2EX_Polish 的嵌套评论查找逻辑
     function inferParent(reply, allReplies) {
-      const floorMatch = reply.textContent.match(/#(\d+)/);
-      const targetFloor = floorMatch ? parseInt(floorMatch[1], 10) : null;
-      const targetUser = reply.mentions?.[0] || null;
+      const { refMemberNames, refFloors, index, floorNum } = reply;
 
-      if (targetUser && targetFloor) {
-        const targetReply = allReplies.find(r => r.floor === targetFloor);
-        if (targetReply && targetReply.author.toLowerCase() === targetUser.toLowerCase()) {
-          return targetReply;
+      if (!refMemberNames || refMemberNames.length === 0) return null;
+
+      // 从当前评论往前找，找到第一个引用的用户名的评论
+      for (let j = index - 1; j >= 0; j--) {
+        const r = allReplies[j];
+        if (r.memberName.toLowerCase() === refMemberNames[0].toLowerCase()) {
+          let parentIdx = j;
+
+          // 如果有楼层号，校验楼层号是否匹配
+          const firstRefFloor = refFloors?.[0];
+          if (firstRefFloor && parseInt(firstRefFloor, 10) !== r.floorNum) {
+            // 找到了指定回复的用户后，发现跟指定楼层对不上，继续寻找
+            const targetIdx = allReplies.slice(0, j).findIndex(
+              (data) => data.floorNum === parseInt(firstRefFloor, 10) &&
+                        data.memberName.toLowerCase() === refMemberNames[0].toLowerCase()
+            );
+            if (targetIdx >= 0) {
+              parentIdx = targetIdx;
+            }
+          }
+
+          // 确保父楼层在当前楼层之前
+          if (allReplies[parentIdx].floorNum < floorNum) {
+            return allReplies[parentIdx];
+          }
+          return null;
         }
       }
 
-      if (targetUser) {
-        for (let i = allReplies.length - 1; i >= 0; i--) {
-          const r = allReplies[i];
-          if (r.floor < reply.floor && r.author.toLowerCase() === targetUser.toLowerCase()) return r;
+      // 如果只引用了楼层号而没有用户名
+      if (refFloors && refFloors.length > 0) {
+        const targetFloor = parseInt(refFloors[0], 10);
+        if (targetFloor < floorNum) {
+          return allReplies.find(r => r.floorNum === targetFloor);
         }
-      }
-
-      if (targetFloor && targetFloor < reply.floor) {
-        const parent = allReplies.find(r => r.floor === targetFloor);
-        if (parent) return parent;
       }
 
       return null;
@@ -632,7 +667,7 @@
       const STORAGE_KEY = `v2_last_read_${topicId}`;
       const storedValue = localStorage.getItem(STORAGE_KEY);
       let maxFloor = 0;
-      for (const r of replies) if (r.floor > maxFloor) maxFloor = r.floor;
+      for (const r of replies) if (r.floorNum > maxFloor) maxFloor = r.floorNum;
 
       if (storedValue === null) {
         localStorage.setItem(STORAGE_KEY, String(maxFloor));
@@ -642,7 +677,7 @@
       const lastReadFloor = parseInt(storedValue, 10) || 0;
 
       for (const r of replies) {
-        if (r.floor > lastReadFloor) {
+        if (r.floorNum > lastReadFloor) {
           r.element.classList.add('reply-new');
           const authorContainer = r.element.querySelector('strong');
           if (authorContainer && !authorContainer.querySelector('.new-dot')) {
@@ -702,7 +737,7 @@
         otherPagesReplies.forEach(list => { allReplies = allReplies.concat(list); });
       }
 
-      allReplies.sort((a, b) => a.floor - b.floor);
+      allReplies.sort((a, b) => a.floorNum - b.floorNum);
       document.querySelectorAll('.page_input, .page_current, .page_normal')
         .forEach(el => el.closest('div')?.remove());
 
