@@ -344,196 +344,67 @@
   // =========================
   // 3) 功能B：Base64 自动解码
   // =========================
+
   const B64 = (() => {
     const CFG = {
-      MAX_LEN: 4096,
-      URL_ONLY: false,
+      MIN_LEN: 8,
       TARGET_SELECTORS: ['.topic_content', '.reply_content'],
-      SKIP_IN_LINK_TEXT_REPLACE: true,
+      EXCLUDE_LIST: [
+        'boss', 'bilibili', 'Bilibili', 'Encrypto', 'encrypto',
+        'Window10', 'airpords', 'Windows7',
+      ],
     };
 
-    const SEP_RE = /[\s\u200b\u200c\u200d\uFEFF]/g;
-    const SEP_SPLIT_RE = /[\s\u200b\u200c\u200d\uFEFF]+/;
-    const B64_RE = /(^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){7,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2}))(?=[^A-Za-z0-9+/_-]|$)/g;
-    const TRAILING_HINT_RE = /(?:[\s\u200b\u200c\u200d\uFEFF]+(?:base64|b64|decode|encoded?|编码|解码))+\s*$/i;
+    const BASE64_RE = /[A-Za-z0-9+/=]+/g;
 
-    function normalizeBase64(s) {
-      let x = s.replace(/-/g, '+').replace(/_/g, '/').trim();
-      const pad = x.length % 4;
-      if (pad) x += '='.repeat(4 - pad);
-      return x;
+    /**
+     * 对字符串进行自定义转义处理，使非 ASCII 字符安全用于 URL 解码。
+     */
+    function customEscape(str) {
+      return str.replace(
+        /[^a-zA-Z0-9_.!~*'()-]/g,
+        (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`
+      );
     }
 
-    function safeDecodeURIComponent(s) {
-      try { return decodeURIComponent(s); } catch (_) {}
-      try { return decodeURI(s); } catch (_) {}
-      return null;
-    }
+    /**
+     * 检查字符串是否可能是 base64 编码并尝试解码。
+     * 返回解码后的字符串，或 null（如果无法解码）。
+     */
+    function tryDecode(text) {
+      // 检查长度是否为 4 的倍数
+      if (text.length % 4 !== 0) return null;
+      // 字符长度太小排除掉
+      if (text.length <= CFG.MIN_LEN) return null;
+      // 排除已知高频非 base64 字符串
+      if (CFG.EXCLUDE_LIST.includes(text)) return null;
 
-    function extractFirstUrl(s) {
-      if (!s) return null;
-      const m = s.match(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>\x00-\x08\x0B\x0C\x0E-\x1F]+/);
-      return m ? m[0] : null;
-    }
-
-    function getBase64Candidates(raw) {
-      if (!raw) return [];
-
-      const variants = [];
-      const seen = new Set();
-      const pushVariant = (value) => {
-        if (!value) return;
-        const cleaned = value.replace(SEP_RE, '');
-        if (!cleaned || seen.has(cleaned)) return;
-        seen.add(cleaned);
-        variants.push(cleaned);
-      };
-
-      const trimmed = raw.trim();
-      pushVariant(trimmed);
-
-      const stripped = trimmed.replace(TRAILING_HINT_RE, '').trim();
-      if (stripped && stripped !== trimmed) pushVariant(stripped);
-
-      const tokens = trimmed.split(SEP_SPLIT_RE).filter(Boolean);
-      if (tokens.length > 1) {
-        pushVariant(tokens.join(''));
-        for (let drop = 1; drop <= Math.min(4, tokens.length - 1); drop++) {
-          pushVariant(tokens.slice(0, -drop).join(''));
+      // 检查填充字符 "=" 的位置是否正确（只能在末尾 1 或 2 位）
+      if (text.includes('=')) {
+        const paddingIndex = text.indexOf('=');
+        if (paddingIndex !== text.length - 1 && paddingIndex !== text.length - 2) {
+          return null;
         }
       }
 
-      return variants;
-    }
-
-    function decodeBase64Candidate(cleaned) {
-      if (!cleaned) return null;
-      if (cleaned.length < 8 || cleaned.length > CFG.MAX_LEN) return null;
-
-      if (!cleaned.endsWith('=')) {
-        const rawClean = cleaned.replace(/=+$/, '');
-        const rawAlphaNum = rawClean.replace(/[^A-Za-z0-9]/g, '');
-        if (/^[0-9a-f]+$/i.test(rawAlphaNum)) return null; 
-        if (/^[a-z]+$/.test(rawAlphaNum)) return null;
-        if (/^[A-Z]+$/.test(rawAlphaNum)) return null;
-      }
-
-      const norm = normalizeBase64(cleaned);
-      let bin;
-      try { bin = atob(norm); } catch { return null; }
-
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-      const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-      const hasReplacement = text.includes('\ufffd');
-      const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-
-      return {
-        cleanText,
-        hasReplacement,
-        hasControlChars: text.length !== cleanText.length,
-        url: extractFirstUrl(cleanText),
-      };
-    }
-
-    function scoreDecodedCandidate(candidate) {
-      if (!candidate) return -Infinity;
-
-      const trimmed = candidate.cleanText.trim();
-      if (!trimmed) return -Infinity;
-
-      let score = 0;
-      if (candidate.url) score += 100;
-      if (!candidate.hasReplacement) score += 40;
-      if (!candidate.hasControlChars) score += 20;
-      if (candidate.url && trimmed === candidate.url) score += 20;
-
-      if (candidate.url && trimmed.startsWith(candidate.url)) {
-        const suffix = trimmed.slice(candidate.url.length).trim();
-        if (!suffix) {
-          score += 10;
-        } else if (!/^[)\],.!?:;'"`]+$/.test(suffix)) {
-          score -= 30;
-        }
-      }
-
-      if (/[\u00C0-\u02FF\u0370-\u1FFF]/.test(candidate.cleanText) && !/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(candidate.cleanText)) {
-        score -= 60;
-      }
-
-      if (!/[A-Za-z0-9\u4E00-\u9FFF]/.test(trimmed)) {
-        score -= 40;
-      }
-
-      return score;
-    }
-
-    function tryDecodeBase64(raw) {
-      if (!raw) return null;
-
-      let best = null;
-      let bestScore = -Infinity;
-
-      for (const cleaned of getBase64Candidates(raw)) {
-        const candidate = decodeBase64Candidate(cleaned);
-        const score = scoreDecodedCandidate(candidate);
-        if (score > bestScore) {
-          best = candidate;
-          bestScore = score;
-        }
-      }
-
-      if (!best) return null;
-      if (best.hasReplacement) return null;
-      if (best.hasControlChars) return null;
-
-      const cleanText = best.cleanText;
-      const url1 = best.url;
-      if (url1) return { display: url1, url: url1 };
-
-      if (/[\u00C0-\u02FF\u0370-\u1FFF]/.test(cleanText) && !/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(cleanText)) {
+      try {
+        const decodedStr = decodeURIComponent(customEscape(window.atob(text)));
+        // 解码后必须包含有意义的内容（至少有字母、数字或中文）
+        if (!/[A-Za-z0-9一-鿿]/.test(decodedStr)) return null;
+        return decodedStr;
+      } catch (_) {
         return null;
       }
-
-      if (!/[A-Za-z0-9\u4E00-\u9FFF]/.test(cleanText)) {
-        return null;
-      }
-
-      if (!CFG.URL_ONLY) {
-        const t = cleanText.trim();
-        if (!t) return null;
-
-        if (/%[0-9A-Fa-f]{2}/.test(t)) {
-          const u = safeDecodeURIComponent(t);
-          if (u) {
-            const url2 = extractFirstUrl(u);
-            if (url2) return { display: url2, url: url2 };
-            return { display: u, url: null };
-          }
-        }
-        
-        if (t.includes('://')) {
-          const url3 = extractFirstUrl(t);
-          if (url3) return { display: url3, url: url3 };
-        }
-
-        return { display: t, url: null };
-      }
-
-      return null;
     }
 
-    function makeBadge(raw, decodedObj) {
-      const { display, url } = decodedObj;
-
+    function makeBadge(raw, decoded) {
       const wrap = document.createElement('span');
       wrap.className = 'v2-b64-badge';
-      wrap.title = `base64: ${raw.replace(SEP_RE, '')}`;
+      wrap.title = `base64: ${raw}`;
 
       const label = document.createElement('span');
       label.className = 'v2-b64-text';
-      label.textContent = display;
+      label.textContent = decoded;
       wrap.appendChild(label);
 
       const btnCopy = document.createElement('button');
@@ -542,17 +413,18 @@
       btnCopy.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        GM_setClipboard(display);
+        GM_setClipboard(decoded);
         btnCopy.textContent = '已复制';
         setTimeout(() => (btnCopy.textContent = '复制'), 900);
       });
       wrap.appendChild(btnCopy);
 
-      if (url) {
+      // 如果解码结果是 URL，添加打开链接按钮
+      if (/^https?:\/\//i.test(decoded)) {
         const a = document.createElement('a');
         a.className = 'v2-b64-link';
         a.textContent = '打开';
-        a.href = url;
+        a.href = decoded;
         a.target = '_blank';
         a.rel = 'noreferrer noopener';
         wrap.appendChild(a);
@@ -561,87 +433,72 @@
       return wrap;
     }
 
-    function shouldSkipTextNode(node) {
-      if (!node || !node.parentElement) return true;
-      if (!node.nodeValue || node.nodeValue.length < 8) return true;
-      const p = node.parentElement;
-      if (p.closest('.v2-b64-badge')) return true;
-      if (CFG.SKIP_IN_LINK_TEXT_REPLACE && p.closest('a')) return true;
-      return false;
-    }
+    function processContent(contentEl) {
+      if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
 
-    function processTextNode(node) {
-      const text = node.nodeValue;
-      B64_RE.lastIndex = 0;
+      // 获取需要排除的内容（a 和 img 标签）
+      const excludeTextList = [
+        ...contentEl.getElementsByTagName('a'),
+        ...contentEl.getElementsByTagName('img'),
+      ].map((ele) => ele.outerHTML);
 
-      let m, last = 0;
-      let changed = false;
-      const frag = document.createDocumentFragment();
-
-      while ((m = B64_RE.exec(text)) !== null) {
-        const prefix = m[1] || '';
-        const rawWithSep = m[2];
-
-        const decodedObj = tryDecodeBase64(rawWithSep);
-        if (!decodedObj) continue;
-
-        changed = true;
-        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-        if (prefix) frag.appendChild(document.createTextNode(prefix));
-        frag.appendChild(makeBadge(rawWithSep, decodedObj));
-
-        last = m.index + prefix.length + rawWithSep.length;
-      }
-
-      if (!changed) return;
-      frag.appendChild(document.createTextNode(text.slice(last)));
-      node.parentNode.replaceChild(frag, node);
-    }
-
-    function processLinkText(el) {
-      if (!el || el.nodeType !== 1) return;
-      if (el.matches('a')) return;
-      if (el.dataset.v2b64linkscanned === '1') return;
-
-      const t = el.textContent || '';
-      const m = t.match(/[A-Za-z0-9+/_-](?:[\s\u200b\u200c\u200d\uFEFF]*[A-Za-z0-9+/_-]){7,}(?:[\s\u200b\u200c\u200d\uFEFF]*={0,2})/);
-      if (m) {
-        const decodedObj = tryDecodeBase64(m[0]);
-        if (decodedObj) {
-          const badge = makeBadge(m[0], decodedObj);
-          el.insertAdjacentElement('afterend', badge);
-        }
-      }
-
-      el.dataset.v2b64linkscanned = '1';
-    }
-
-    function scanElement(el) {
-      if (!el || el.nodeType !== 1) return;
-      if (el.dataset.v2b64scanned === '1') return;
-
+      // 遍历所有文本节点
       const walker = document.createTreeWalker(
-        el,
+        contentEl,
         NodeFilter.SHOW_TEXT,
         {
-          acceptNode: (node) => (shouldSkipTextNode(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+          acceptNode: (node) => {
+            if (!node.nodeValue || node.nodeValue.length <= CFG.MIN_LEN) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            const p = node.parentElement;
+            if (p.closest('.v2-b64-badge')) return NodeFilter.FILTER_REJECT;
+            if (p.closest('a, img')) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          },
         }
       );
 
       const nodes = [];
       while (walker.nextNode()) nodes.push(walker.currentNode);
-      nodes.forEach(processTextNode);
 
-      if (CFG.SKIP_IN_LINK_TEXT_REPLACE) {
-        el.querySelectorAll('a').forEach(processLinkText);
-      }
+      nodes.forEach((node) => {
+        const text = node.nodeValue;
+        let last = 0;
+        const frag = document.createDocumentFragment();
+        let changed = false;
 
-      el.dataset.v2b64scanned = '1';
+        BASE64_RE.lastIndex = 0;
+        let m;
+        while ((m = BASE64_RE.exec(text)) !== null) {
+          const candidate = m[0];
+
+          // 检查是否在排除列表的内容中
+          if (excludeTextList.some((excludeText) => excludeText.includes(candidate))) {
+            continue;
+          }
+
+          const decoded = tryDecode(candidate);
+          if (!decoded) continue;
+
+          changed = true;
+          frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          frag.appendChild(makeBadge(candidate, decoded));
+          last = m.index + candidate.length;
+        }
+
+        if (changed) {
+          frag.appendChild(document.createTextNode(text.slice(last)));
+          node.parentNode.replaceChild(frag, node);
+        }
+      });
+
+      contentEl.dataset.v2b64scanned = '1';
     }
 
     function scanAll() {
       for (const sel of CFG.TARGET_SELECTORS) {
-        document.querySelectorAll(sel).forEach(scanElement);
+        document.querySelectorAll(sel).forEach(processContent);
       }
     }
 
@@ -661,16 +518,17 @@
       const root = document.querySelector('#Main') || document.body;
       const observer = new MutationObserver((mutations) => {
         for (const m of mutations) {
-          if (m.type === 'childList' && (m.addedNodes?.length || m.removedNodes?.length)) { scheduleScan(); break; }
-          if (m.type === 'characterData') { scheduleScan(); break; }
+          if (m.type === 'childList' && (m.addedNodes?.length || m.removedNodes?.length)) {
+            scheduleScan();
+            break;
+          }
         }
       });
-      observer.observe(root, { childList: true, subtree: true, characterData: true });
+      observer.observe(root, { childList: true, subtree: true });
     }
 
     return { boot };
   })();
-
   // =========================
   // 4) 功能C：楼层树 + 多页加载
   // =========================
@@ -1033,7 +891,7 @@
     function processImage(img) {
       const src = img.getAttribute('src');
       if (!src) return;
-      
+
       // 检查是否包含 imgur.com 且还没被代理过
       if (src.includes('imgur.com') && !src.includes('external-content.duckduckgo.com')) {
         // 补全协议 (有些图片可能以 // 开头)
