@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室 + Imgur代理）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.6
+// @version      2.0.7
 // @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载。
 // @author       you
 // @match        https://v2ex.com/*
@@ -77,6 +77,8 @@
       width: 36px !important;
       height: 36px !important;
       border-radius: 4px;
+      object-fit: cover;
+      aspect-ratio: 1;
     }
     .reply_content {
       font-size: 14px;
