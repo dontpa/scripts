@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室 + Imgur代理）
 // @namespace    https://tampermonkey.net/
-// @version      2.0.9
-// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载。
+// @version      2.1.0
+// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载；j/k 键在新回复间快速导航。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -123,6 +123,13 @@
       letter-spacing: 0.4px;
     }
 
+    /* 键盘导航当前高亮（在 reply-new 基础上叠加环形描边）*/
+    .reply-nav-active > .cell {
+      outline: 2px solid rgba(74, 122, 240, 0.55) !important;
+      outline-offset: -2px;
+      transition: outline 0.15s ease;
+    }
+
     #v2ex-loading-bar {
       padding: 8px;
       background: #fff;
@@ -132,6 +139,47 @@
       color: #999;
     }
     .cell[style*="text-align: center"], #bottom-pagination, a[name="last_page"] { display: none; }
+
+    /* ===== j/k 导航 HUD ===== */
+    #v2ex-nav-hud {
+      position: fixed;
+      bottom: 28px;
+      right: 28px;
+      z-index: 99998;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px 7px 10px;
+      background: rgba(30, 34, 45, 0.88);
+      color: #e8eaf0;
+      border-radius: 20px;
+      font-size: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0.3px;
+      backdrop-filter: blur(6px);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.22);
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    #v2ex-nav-hud.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    #v2ex-nav-hud .hud-icon {
+      font-size: 11px;
+      opacity: 0.6;
+    }
+    #v2ex-nav-hud .hud-count {
+      font-weight: 600;
+      color: #7fa8ff;
+    }
+    #v2ex-nav-hud .hud-hint {
+      opacity: 0.45;
+      font-size: 11px;
+      margin-left: 2px;
+    }
 
     /* ===== Base64 Badge（极简）===== */
     .v2-b64-badge{
@@ -566,6 +614,7 @@
 
     return { boot };
   })();
+
   // =========================
   // 4) 功能C：楼层树 + 多页加载
   // =========================
@@ -959,7 +1008,138 @@
   })();
 
   // =========================
-  // 6) 功能E：Imgur 图片代理 (DuckDuckGo Proxy)
+  // 6) 功能E：j/k 键盘导航新回复
+  // =========================
+  const NavKeys = (() => {
+    // ThreadTree 完成渲染后 .reply-new 元素才存在，
+    // 用轻量轮询等待（最多 8 秒），检测到后立即激活。
+    const POLL_INTERVAL = 200;
+    const POLL_TIMEOUT  = 8000;
+
+    // 目标回复距视口顶部的偏移比例（0.22 = 约 22% 处，视觉舒适）
+    const SCROLL_OFFSET_RATIO = 0.22;
+
+    let newReplies = [];   // 按 DOM 顺序排列的 .reply-new 元素
+    let curIndex   = -1;   // 当前聚焦的索引，-1 表示尚未导航
+    let hudTimer   = null;
+
+    // ── HUD 浮层 ──────────────────────────────────────────
+    function getHud() {
+      let hud = document.getElementById('v2ex-nav-hud');
+      if (!hud) {
+        hud = document.createElement('div');
+        hud.id = 'v2ex-nav-hud';
+        document.body.appendChild(hud);
+      }
+      return hud;
+    }
+
+    function showHud(index, total, direction) {
+      const hud = getHud();
+      const arrow = direction === 'next' ? '↓' : '↑';
+      hud.innerHTML = `
+        <span class="hud-icon">${arrow}</span>
+        <span>NEW</span>
+        <span class="hud-count">${index + 1} / ${total}</span>
+        <span class="hud-hint">j↓ k↑</span>
+      `;
+      hud.classList.add('visible');
+
+      clearTimeout(hudTimer);
+      hudTimer = setTimeout(() => hud.classList.remove('visible'), 2200);
+    }
+
+    // ── 滚动到目标，令其显示在视口约 22% 处 ─────────────
+    function scrollToReply(el) {
+      const targetTop = el.getBoundingClientRect().top
+        + window.scrollY
+        - window.innerHeight * SCROLL_OFFSET_RATIO;
+      window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+    }
+
+    // ── 切换当前聚焦高亮 ──────────────────────────────────
+    function setActive(el) {
+      // 移除旧高亮
+      document.querySelectorAll('.reply-nav-active').forEach(e => {
+        e.classList.remove('reply-nav-active');
+      });
+      if (el) {
+        // .reply-new 在 cell 上，其父级是 .reply-wrapper
+        const wrapper = el.closest('.reply-wrapper') || el;
+        wrapper.classList.add('reply-nav-active');
+      }
+    }
+
+    // ── 刷新新回复列表（DOM 顺序）────────────────────────
+    function refreshList() {
+      // querySelectorAll 按 DOM 顺序返回，符合楼层顺序
+      newReplies = Array.from(document.querySelectorAll('.reply-new'));
+    }
+
+    // ── 核心导航 ─────────────────────────────────────────
+    function navigate(direction) {
+      refreshList();
+      if (!newReplies.length) return;
+
+      if (direction === 'next') {
+        curIndex = Math.min(curIndex + 1, newReplies.length - 1);
+      } else {
+        curIndex = Math.max(curIndex - 1, 0);
+      }
+
+      const target = newReplies[curIndex];
+      setActive(target);
+      scrollToReply(target);
+      showHud(curIndex, newReplies.length, direction);
+    }
+
+    // ── 键盘事件监听 ──────────────────────────────────────
+    function onKeyDown(e) {
+      // 在输入框 / 可编辑区域时不拦截
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
+      // 有 modifier 键时不拦截
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // overlay 打开时不拦截（高赞阅览室）
+      if (document.getElementById('hot-overlay')?.classList.contains('active')) return;
+
+      if (e.key === 'j') {
+        e.preventDefault();
+        navigate('next');
+      } else if (e.key === 'k') {
+        e.preventDefault();
+        navigate('prev');
+      }
+    }
+
+    // ── 等待 reply-new 出现后激活 ────────────────────────
+    function waitAndBoot() {
+      const start = Date.now();
+      const timer = setInterval(() => {
+        const found = document.querySelectorAll('.reply-new').length > 0;
+        const timedOut = Date.now() - start > POLL_TIMEOUT;
+
+        if (found || timedOut) {
+          clearInterval(timer);
+          if (found) {
+            refreshList();
+            document.addEventListener('keydown', onKeyDown);
+            log(`NavKeys ready: ${newReplies.length} new replies`);
+          }
+        }
+      }, POLL_INTERVAL);
+    }
+
+    function boot() {
+      if (!isTopicPage()) return;
+      waitAndBoot();
+    }
+
+    return { boot };
+  })();
+
+  // =========================
+  // 7) 功能F：Imgur 图片代理 (DuckDuckGo Proxy)
   // =========================
   const ImgurProxy = (() => {
     function processImage(img) {
@@ -1022,7 +1202,7 @@
   })();
 
   // =========================
-  // 7) 启动
+  // 8) 启动
   // =========================
   Daily.boot();
 
@@ -1030,6 +1210,7 @@
     ThreadTree.boot();
     B64.boot();
     HotRoom.boot();
-    ImgurProxy.boot(); // 启动代理模块
+    NavKeys.boot();
+    ImgurProxy.boot();
   }
 })();
