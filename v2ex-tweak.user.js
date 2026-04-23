@@ -54,7 +54,8 @@
       --line-color: #f0f0f0;
       --line-hover: #c0c0c0;
       --bg-hover: #fafafa;
-      --bg-new: #fffdf9;
+      --new-accent: #4a7af0;
+      --bg-new: #edf2ff;
     }
 
     .box { padding-bottom: 0 !important; }
@@ -95,19 +96,31 @@
     }
     .ago, .no, .fade { font-size: 11px !important; }
 
-    .reply-new > .cell { background-color: var(--bg-new) !important; }
+    .reply-new > .cell {
+      background: linear-gradient(
+        90deg,
+        rgba(74, 122, 240, 0.13) 0%,
+        rgba(74, 122, 240, 0.05) 40%,
+        transparent 100%
+      ) !important;
+      border-left: 4px solid #4a7af0 !important;
+      padding-left: 4px !important;
+    }
 
-    .new-dot {
+    .new-badge {
       display: inline-block;
-      width: 6px;
-      height: 6px;
-      background-color: #ff4d4f;
-      border-radius: 50%;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--new-accent);
+      background: rgba(91, 138, 245, 0.10);
+      border: 1px solid rgba(91, 138, 245, 0.22);
+      border-radius: 3px;
+      padding: 0 4px;
+      line-height: 15px;
+      height: 15px;
       margin-right: 6px;
       vertical-align: middle;
-      position: relative;
-      top: -1px;
-      box-shadow: 0 0 3px rgba(255, 77, 79, 0.4);
+      letter-spacing: 0.4px;
     }
 
     #v2ex-loading-bar {
@@ -704,11 +717,12 @@
         if (r.floorNum > lastReadFloor) {
           r.element.classList.add('reply-new');
           const authorContainer = r.element.querySelector('strong');
-          if (authorContainer && !authorContainer.querySelector('.new-dot')) {
-            const dot = document.createElement('span');
-            dot.className = 'new-dot';
-            dot.title = 'New reply';
-            authorContainer.prepend(dot);
+          if (authorContainer && !authorContainer.querySelector('.new-badge')) {
+            const badge = document.createElement('span');
+            badge.className = 'new-badge';
+            badge.textContent = 'NEW';
+            badge.title = '未读新回复';
+            authorContainer.prepend(badge);
           }
         }
       }
@@ -762,6 +776,7 @@
       }
 
       allReplies.sort((a, b) => a.floorNum - b.floorNum);
+      allReplies.forEach((reply, i) => { reply.index = i; });
       document.querySelectorAll('.page_input, .page_current, .page_normal')
         .forEach(el => el.closest('div')?.remove());
 
