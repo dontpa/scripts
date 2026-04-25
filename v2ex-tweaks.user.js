@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         V2EX 全功能增强（楼层树/多页 + Base64解码 + 自动签到 + 高赞阅览室 + Imgur代理）
+// @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
 // @version      2.1.0
-// @description  多页加载并以 Hacker News 风格重排楼层；Base64 自动解码；每日自动签到；高赞回复阅览室；自动将 Imgur 图片替换为 DuckDuckGo 代理加载；j/k 键在新回复间快速导航。
+// @description  V2EX 日常增强：回复按引用关系重组为嵌套树并合并所有分页；自动标记未读新回复，j/k 键快速跳转；高赞回复一键全屏浏览；Base64 自动解码内联展示；每日签到静默后台完成；Imgur 图片自动走代理加载。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
