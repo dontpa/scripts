@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.1.0
+// @version      2.1.1
 // @description  V2EX 日常增强：回复按引用关系重组为嵌套树并合并所有分页；自动标记未读新回复，j/k 键快速跳转；高赞回复一键全屏浏览；Base64 自动解码内联展示；每日签到静默后台完成；Imgur 图片自动走代理加载。
 // @author       you
 // @match        https://v2ex.com/*
@@ -51,26 +51,62 @@
     /* ===== 楼层树（Hacker News Style）===== */
     :root {
       --indent-width: 16px;
-      --line-color: #f0f0f0;
-      --line-hover: #c0c0c0;
-      --bg-hover: #fafafa;
+      --line-color: #ebebeb;
+      --line-hover: #a8beff;
+      --bg-hover: #fafbff;
       --new-accent: #4a7af0;
+      --new-accent-soft: rgba(74, 122, 240, 0.08);
       --bg-new: #edf2ff;
     }
 
     .box { padding-bottom: 0 !important; }
 
+    /* ── 树形缩进容器 ── */
     .reply-children {
       margin-left: var(--indent-width);
       border-left: 2px solid var(--line-color);
-      transition: border-color 0.2s;
+      transition: border-color 0.2s, opacity 0.2s;
+      position: relative;
     }
-    .reply-children:hover { border-left-color: var(--line-hover); }
 
+    /* 折叠状态 */
+    .reply-children.is-collapsed {
+      display: none;
+    }
+
+    /* 可折叠的缩进线：hover 时变蓝，提示可点击 */
+    .reply-children.collapsible {
+      cursor: pointer;
+    }
+    .reply-children.collapsible:hover {
+      border-left-color: var(--line-hover);
+    }
+    /* 禁止子节点的 click 冒泡到父缩进线 */
+    .reply-children .reply-children {
+      pointer-events: auto;
+    }
+
+    /* ── 折叠指示器 badge ── */
+    .reply-collapsed-hint {
+      display: none;
+      font-size: 11px;
+      color: #999;
+      padding: 3px 8px 3px calc(var(--indent-width) + 4px);
+      cursor: pointer;
+      user-select: none;
+      transition: color 0.15s;
+    }
+    .reply-collapsed-hint:hover { color: var(--new-accent); }
+    .reply-children.is-collapsed + .reply-collapsed-hint {
+      display: block;
+    }
+
+    /* ── 单条回复 ── */
     .reply-wrapper .cell {
       padding: 6px 8px !important;
-      border-bottom: 1px solid #fafafa !important;
+      border-bottom: 1px solid #f5f5f5 !important;
       background: transparent;
+      transition: background 0.12s;
     }
     .reply-wrapper > .cell:hover { background-color: var(--bg-hover); }
 
@@ -96,38 +132,72 @@
     }
     .ago, .no, .fade { font-size: 11px !important; }
 
+    /* ── 未读新回复高亮 ── */
     .reply-new > .cell {
       background: linear-gradient(
         90deg,
-        rgba(74, 122, 240, 0.13) 0%,
-        rgba(74, 122, 240, 0.05) 40%,
+        rgba(74, 122, 240, 0.10) 0%,
+        rgba(74, 122, 240, 0.04) 50%,
         transparent 100%
       ) !important;
-      border-left: 4px solid #4a7af0 !important;
-      padding-left: 4px !important;
+      border-left: 3px solid #4a7af0 !important;
+      padding-left: 5px !important;
+      animation: new-reply-flash 0.6s ease-out;
     }
 
+    @keyframes new-reply-flash {
+      0%   { background-color: rgba(74, 122, 240, 0.18); }
+      100% { background-color: transparent; }
+    }
+
+    /* ── NEW 角标 ──
+       改为放在楼层号之后（strong 的右侧），脱离加粗 strong 上下文
+       使用 outline 风格，不抢眼但清晰可辨
+    */
     .new-badge {
       display: inline-block;
-      font-size: 10px;
-      font-weight: 600;
+      font-size: 9px;
+      font-weight: 700;
       color: var(--new-accent);
-      background: rgba(91, 138, 245, 0.10);
-      border: 1px solid rgba(91, 138, 245, 0.22);
+      background: transparent;
+      border: 1px solid rgba(74, 122, 240, 0.45);
       border-radius: 3px;
-      padding: 0 4px;
-      line-height: 15px;
-      height: 15px;
-      margin-right: 6px;
+      padding: 0 3px;
+      line-height: 14px;
+      height: 14px;
+      /* 放在 strong 右侧，与 .ago 同排 */
+      margin-left: 5px;
+      margin-right: 2px;
       vertical-align: middle;
-      letter-spacing: 0.4px;
+      letter-spacing: 0.5px;
+      position: relative;
+      top: -1px;
     }
 
-    /* 键盘导航当前高亮（在 reply-new 基础上叠加环形描边）*/
-    .reply-nav-active > .cell {
-      outline: 2px solid rgba(74, 122, 240, 0.55) !important;
-      outline-offset: -2px;
-      transition: outline 0.15s ease;
+    /* ── 新回复数量提示条 ── */
+    #v2ex-new-count-bar {
+      padding: 6px 12px;
+      background: linear-gradient(90deg, #eef2ff 0%, #f8f9ff 100%);
+      border-bottom: 1px solid #dde5ff;
+      border-radius: 4px 4px 0 0;
+      font-size: 12px;
+      color: #6680cc;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+    }
+    #v2ex-new-count-bar .ncb-dot {
+      width: 6px; height: 6px;
+      background: var(--new-accent);
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    #v2ex-new-count-bar strong { color: var(--new-accent); font-weight: 700; }
+    #v2ex-new-count-bar .ncb-hint {
+      margin-left: auto;
+      opacity: 0.5;
+      font-size: 11px;
     }
 
     #v2ex-loading-bar {
@@ -148,40 +218,56 @@
       z-index: 99998;
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 7px 14px 7px 10px;
-      background: rgba(30, 34, 45, 0.88);
-      color: #e8eaf0;
+      gap: 6px;
+      padding: 6px 14px 6px 10px;
+      background: rgba(22, 27, 46, 0.90);
+      color: #dde4ff;
       border-radius: 20px;
       font-size: 12px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: 0.3px;
-      backdrop-filter: blur(6px);
-      box-shadow: 0 4px 16px rgba(0,0,0,0.22);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.06);
       pointer-events: none;
       opacity: 0;
-      transform: translateY(6px);
+      transform: translateY(8px) scale(0.97);
       transition: opacity 0.18s ease, transform 0.18s ease;
     }
     #v2ex-nav-hud.visible {
       opacity: 1;
-      transform: translateY(0);
+      transform: translateY(0) scale(1);
     }
-    #v2ex-nav-hud .hud-icon {
-      font-size: 11px;
-      opacity: 0.6;
+    #v2ex-nav-hud .hud-arrow {
+      font-size: 13px;
+      opacity: 0.7;
+    }
+    #v2ex-nav-hud .hud-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: #7fa8ff;
+      opacity: 0.8;
     }
     #v2ex-nav-hud .hud-count {
       font-weight: 600;
-      color: #7fa8ff;
+      color: #c5d5ff;
+      font-variant-numeric: tabular-nums;
     }
+    #v2ex-nav-hud .hud-sep { opacity: 0.2; }
     #v2ex-nav-hud .hud-hint {
-      opacity: 0.45;
+      opacity: 0.35;
       font-size: 11px;
-      margin-left: 2px;
+      font-family: monospace;
     }
 
-    /* ===== Base64 Badge（极简）===== */
+    /* 键盘导航当前高亮 */
+    .reply-nav-active > .cell {
+      outline: 2px solid rgba(74, 122, 240, 0.50) !important;
+      outline-offset: -2px;
+      transition: outline 0.15s ease;
+    }
+
+    /* ===== Base64 Badge ===== */
     .v2-b64-badge{
       display:inline-flex; gap:6px; align-items:center;
       margin-left:6px; padding:2px 6px; border-radius:6px;
@@ -206,7 +292,7 @@
       color:inherit;
     }
 
-    /* ===== 高赞阅览室（宽屏沉浸版）===== */
+    /* ===== 高赞阅览室 ===== */
     #v2ex-hot-btn {
       display: inline-block;
       margin-left: 10px;
@@ -276,12 +362,8 @@
     }
     .user-avatar {
       display: block;
-      width: 18px;
-      min-width: 18px;
-      max-width: 18px;
-      height: 18px;
-      min-height: 18px;
-      max-height: 18px;
+      width: 18px; min-width: 18px; max-width: 18px;
+      height: 18px; min-height: 18px; max-height: 18px;
       aspect-ratio: 1 / 1;
       object-fit: cover;
       flex: none;
@@ -429,7 +511,6 @@
   // =========================
   // 3) 功能B：Base64 自动解码
   // =========================
-
   const B64 = (() => {
     const CFG = {
       MIN_LEN: 8,
@@ -442,9 +523,6 @@
 
     const BASE64_RE = /[A-Za-z0-9+/=]+/g;
 
-    /**
-     * 对字符串进行自定义转义处理，使非 ASCII 字符安全用于 URL 解码。
-     */
     function customEscape(str) {
       return str.replace(
         /[^a-zA-Z0-9_.!~*'()-]/g,
@@ -452,19 +530,11 @@
       );
     }
 
-    /**
-     * 检查字符串是否可能是 base64 编码并尝试解码。
-     * 返回解码后的字符串，或 null（如果无法解码）。
-     */
     function tryDecode(text) {
-      // 检查长度是否为 4 的倍数
       if (text.length % 4 !== 0) return null;
-      // 字符长度太小排除掉
       if (text.length <= CFG.MIN_LEN) return null;
-      // 排除已知高频非 base64 字符串
       if (CFG.EXCLUDE_LIST.includes(text)) return null;
 
-      // 检查填充字符 "=" 的位置是否正确（只能在末尾 1 或 2 位）
       if (text.includes('=')) {
         const paddingIndex = text.indexOf('=');
         if (paddingIndex !== text.length - 1 && paddingIndex !== text.length - 2) {
@@ -474,7 +544,6 @@
 
       try {
         const decodedStr = decodeURIComponent(customEscape(window.atob(text)));
-        // 解码后必须包含有意义的内容（至少有字母、数字或中文）
         if (!/[A-Za-z0-9一-鿿]/.test(decodedStr)) return null;
         return decodedStr;
       } catch (_) {
@@ -504,7 +573,6 @@
       });
       wrap.appendChild(btnCopy);
 
-      // 如果解码结果是 URL，添加打开链接按钮
       if (/^https?:\/\//i.test(decoded)) {
         const a = document.createElement('a');
         a.className = 'v2-b64-link';
@@ -521,13 +589,11 @@
     function processContent(contentEl) {
       if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
 
-      // 获取需要排除的内容（a 和 img 标签）
       const excludeTextList = [
         ...contentEl.getElementsByTagName('a'),
         ...contentEl.getElementsByTagName('img'),
       ].map((ele) => ele.outerHTML);
 
-      // 遍历所有文本节点
       const walker = document.createTreeWalker(
         contentEl,
         NodeFilter.SHOW_TEXT,
@@ -558,7 +624,6 @@
         while ((m = BASE64_RE.exec(text)) !== null) {
           const candidate = m[0];
 
-          // 检查是否在排除列表的内容中
           if (excludeTextList.some((excludeText) => excludeText.includes(candidate))) {
             continue;
           }
@@ -619,7 +684,6 @@
   // 4) 功能C：楼层树 + 多页加载
   // =========================
   const ThreadTree = (() => {
-    // 采用 V2EX_Polish 的楼层识别逻辑
     function parseReplyCell(cell, idx) {
       if (!cell || !cell.id || !cell.id.startsWith('r_')) return null;
 
@@ -639,13 +703,11 @@
       const floorNum = parseInt(floor, 10);
       const likes = parseInt(cell.querySelector('span.small')?.innerText || '0', 10);
 
-      // 提取引用的用户名（@username）
       const memberNameMatches = Array.from(content.matchAll(/@([a-zA-Z0-9]+)/g));
       const refMemberNames = memberNameMatches.length > 0
         ? memberNameMatches.map(([, name]) => name)
         : undefined;
 
-      // 提取引用的楼层号（#123）
       const floorMatches = Array.from(content.matchAll(/#(\d+)/g));
       const refFloors = floorMatches.length > 0
         ? floorMatches.map(([, f]) => f)
@@ -673,22 +735,18 @@
       return cells.map((cell, idx) => parseReplyCell(cell, idx)).filter(Boolean);
     }
 
-    // 采用 V2EX_Polish 的嵌套评论查找逻辑
     function inferParent(reply, allReplies) {
       const { refMemberNames, refFloors, index, floorNum } = reply;
 
       if (!refMemberNames || refMemberNames.length === 0) return null;
 
-      // 从当前评论往前找，找到第一个引用的用户名的评论
       for (let j = index - 1; j >= 0; j--) {
         const r = allReplies[j];
         if (r.memberName.toLowerCase() === refMemberNames[0].toLowerCase()) {
           let parentIdx = j;
 
-          // 如果有楼层号，校验楼层号是否匹配
           const firstRefFloor = refFloors?.[0];
           if (firstRefFloor && parseInt(firstRefFloor, 10) !== r.floorNum) {
-            // 找到了指定回复的用户后，发现跟指定楼层对不上，继续寻找
             const targetIdx = allReplies.slice(0, j).findIndex(
               (data) => data.floorNum === parseInt(firstRefFloor, 10) &&
                         data.memberName.toLowerCase() === refMemberNames[0].toLowerCase()
@@ -698,7 +756,6 @@
             }
           }
 
-          // 确保父楼层在当前楼层之前
           if (allReplies[parentIdx].floorNum < floorNum) {
             return allReplies[parentIdx];
           }
@@ -706,7 +763,6 @@
         }
       }
 
-      // 如果只引用了楼层号而没有用户名
       if (refFloors && refFloors.length > 0) {
         const targetFloor = parseInt(refFloors[0], 10);
         if (targetFloor < floorNum) {
@@ -736,12 +792,48 @@
         wrapper.appendChild(reply.element);
 
         if (reply.children.length > 0) {
+          const childCount = reply.children.length;
           const childrenContainer = document.createElement('div');
-          childrenContainer.className = 'reply-children';
+          childrenContainer.className = 'reply-children collapsible';
           reply.children.forEach(child => appendNode(child, childrenContainer));
+
+          // 折叠指示器（collapsed 时显示在 children 之后）
+          const collapsedHint = document.createElement('div');
+          collapsedHint.className = 'reply-collapsed-hint';
+          collapsedHint.textContent = `▶ 展开 ${childCount} 条回复`;
+
+          // 点击缩进线 → 折叠
+          childrenContainer.addEventListener('click', (e) => {
+            // 仅响应直接点击缩进线区域（左侧 16px 内），不影响子回复交互
+            const rect = childrenContainer.getBoundingClientRect();
+            if (e.clientX - rect.left > 20) return;
+            e.stopPropagation();
+            toggleCollapse(childrenContainer, collapsedHint, childCount);
+          });
+
+          // 点击折叠提示 → 展开
+          collapsedHint.addEventListener('click', () => {
+            toggleCollapse(childrenContainer, collapsedHint, childCount);
+          });
+
           wrapper.appendChild(childrenContainer);
+          wrapper.appendChild(collapsedHint);
         }
+
         parentContainer.appendChild(wrapper);
+      }
+
+      function toggleCollapse(childrenContainer, hint, count) {
+        const isNowCollapsed = childrenContainer.classList.toggle('is-collapsed');
+        hint.textContent = isNowCollapsed
+          ? `▶ 展开 ${count} 条回复`
+          : `▼ 折叠 ${count} 条回复`;
+        // 展开后重置 hint 文字（短暂延迟后恢复默认，不常驻占位）
+        if (!isNowCollapsed) {
+          setTimeout(() => {
+            hint.textContent = `▶ 展开 ${count} 条回复`;
+          }, 1800);
+        }
       }
 
       roots.forEach(r => appendNode(r, fragment));
@@ -749,6 +841,7 @@
       container.appendChild(fragment);
     }
 
+    // 返回新回复数量，供 init 显示计数条
     function handleReadStatus(topicId, replies) {
       const STORAGE_KEY = `v2_last_read_${topicId}`;
       const storedValue = localStorage.getItem(STORAGE_KEY);
@@ -757,25 +850,33 @@
 
       if (storedValue === null) {
         localStorage.setItem(STORAGE_KEY, String(maxFloor));
-        return;
+        return 0;
       }
 
       const lastReadFloor = parseInt(storedValue, 10) || 0;
+      let newCount = 0;
 
       for (const r of replies) {
         if (r.floorNum > lastReadFloor) {
+          newCount++;
           r.element.classList.add('reply-new');
-          const authorContainer = r.element.querySelector('strong');
-          if (authorContainer && !authorContainer.querySelector('.new-badge')) {
+
+          // ── 改动：NEW badge 插到 <strong> 之后（strong 的下一个兄弟位置）
+          //    而非 prepend 到 strong 内部，避免在加粗文字中显示奇怪
+          const strongEl = r.element.querySelector('strong');
+          if (strongEl && !r.element.querySelector('.new-badge')) {
             const badge = document.createElement('span');
             badge.className = 'new-badge';
             badge.textContent = 'NEW';
             badge.title = '未读新回复';
-            authorContainer.prepend(badge);
+            // insertAdjacentElement 'afterend' = strong 元素之后、作为兄弟节点
+            strongEl.insertAdjacentElement('afterend', badge);
           }
         }
       }
+
       localStorage.setItem(STORAGE_KEY, String(maxFloor));
+      return newCount;
     }
 
     async function init() {
@@ -830,10 +931,22 @@
         .forEach(el => el.closest('div')?.remove());
 
       renderTree(allReplies, replyBox);
-      handleReadStatus(topicId, allReplies);
+      const newCount = handleReadStatus(topicId, allReplies);
 
       loadingBar.remove();
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
+
+      // ── 新回复计数提示条（有新回复时才显示）
+      if (newCount > 0) {
+        const bar = document.createElement('div');
+        bar.id = 'v2ex-new-count-bar';
+        bar.innerHTML = `
+          <span class="ncb-dot"></span>
+          <span>有 <strong>${newCount}</strong> 条新回复</span>
+          <span class="ncb-hint">j / k 键跳转</span>
+        `;
+        replyBox.parentNode.insertBefore(bar, replyBox);
+      }
     }
 
     function boot() { init().catch(err => log('ThreadTree error:', err)); }
@@ -1011,19 +1124,14 @@
   // 6) 功能E：j/k 键盘导航新回复
   // =========================
   const NavKeys = (() => {
-    // ThreadTree 完成渲染后 .reply-new 元素才存在，
-    // 用轻量轮询等待（最多 8 秒），检测到后立即激活。
     const POLL_INTERVAL = 200;
     const POLL_TIMEOUT  = 8000;
-
-    // 目标回复距视口顶部的偏移比例（0.22 = 约 22% 处，视觉舒适）
     const SCROLL_OFFSET_RATIO = 0.22;
 
-    let newReplies = [];   // 按 DOM 顺序排列的 .reply-new 元素
-    let curIndex   = -1;   // 当前聚焦的索引，-1 表示尚未导航
+    let newReplies = [];
+    let curIndex   = -1;
     let hudTimer   = null;
 
-    // ── HUD 浮层 ──────────────────────────────────────────
     function getHud() {
       let hud = document.getElementById('v2ex-nav-hud');
       if (!hud) {
@@ -1038,9 +1146,9 @@
       const hud = getHud();
       const arrow = direction === 'next' ? '↓' : '↑';
       hud.innerHTML = `
-        <span class="hud-icon">${arrow}</span>
-        <span>NEW</span>
-        <span class="hud-count">${index + 1} / ${total}</span>
+        <span class="hud-arrow">${arrow}</span>
+        <span class="hud-label">NEW</span>
+        <span class="hud-count">${index + 1}<span class="hud-sep"> / </span>${total}</span>
         <span class="hud-hint">j↓ k↑</span>
       `;
       hud.classList.add('visible');
@@ -1049,7 +1157,6 @@
       hudTimer = setTimeout(() => hud.classList.remove('visible'), 2200);
     }
 
-    // ── 滚动到目标，令其显示在视口约 22% 处 ─────────────
     function scrollToReply(el) {
       const targetTop = el.getBoundingClientRect().top
         + window.scrollY
@@ -1057,26 +1164,20 @@
       window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
     }
 
-    // ── 切换当前聚焦高亮 ──────────────────────────────────
     function setActive(el) {
-      // 移除旧高亮
       document.querySelectorAll('.reply-nav-active').forEach(e => {
         e.classList.remove('reply-nav-active');
       });
       if (el) {
-        // .reply-new 在 cell 上，其父级是 .reply-wrapper
         const wrapper = el.closest('.reply-wrapper') || el;
         wrapper.classList.add('reply-nav-active');
       }
     }
 
-    // ── 刷新新回复列表（DOM 顺序）────────────────────────
     function refreshList() {
-      // querySelectorAll 按 DOM 顺序返回，符合楼层顺序
       newReplies = Array.from(document.querySelectorAll('.reply-new'));
     }
 
-    // ── 核心导航 ─────────────────────────────────────────
     function navigate(direction) {
       refreshList();
       if (!newReplies.length) return;
@@ -1093,14 +1194,10 @@
       showHud(curIndex, newReplies.length, direction);
     }
 
-    // ── 键盘事件监听 ──────────────────────────────────────
     function onKeyDown(e) {
-      // 在输入框 / 可编辑区域时不拦截
       const tag = document.activeElement?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
-      // 有 modifier 键时不拦截
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      // overlay 打开时不拦截（高赞阅览室）
       if (document.getElementById('hot-overlay')?.classList.contains('active')) return;
 
       if (e.key === 'j') {
@@ -1112,7 +1209,6 @@
       }
     }
 
-    // ── 等待 reply-new 出现后激活 ────────────────────────
     function waitAndBoot() {
       const start = Date.now();
       const timer = setInterval(() => {
@@ -1139,16 +1235,14 @@
   })();
 
   // =========================
-  // 7) 功能F：Imgur 图片代理 (DuckDuckGo Proxy)
+  // 7) 功能F：Imgur 图片代理
   // =========================
   const ImgurProxy = (() => {
     function processImage(img) {
       const src = img.getAttribute('src');
       if (!src) return;
 
-      // 检查是否包含 imgur.com 且还没被代理过
       if (src.includes('imgur.com') && !src.includes('external-content.duckduckgo.com')) {
-        // 补全协议 (有些图片可能以 // 开头)
         let fullUrl = src;
         if (src.startsWith('//')) {
           fullUrl = 'https:' + src;
@@ -1156,12 +1250,10 @@
           fullUrl = 'https://' + src;
         }
 
-        // 替换 src
         const proxyUrl = `https://external-content.duckduckgo.com/iu/?u=${encodeURIComponent(fullUrl)}&f=1&nofb=1`;
         img.setAttribute('src', proxyUrl);
         img.dataset.proxied = '1';
 
-        // 顺带替换包裹在外层的 <a> 标签的 href (V2EX 经常会将大图用 a 标签包裹)
         const parent = img.parentElement;
         if (parent && parent.tagName.toLowerCase() === 'a') {
           const href = parent.getAttribute('href');
@@ -1180,10 +1272,8 @@
     }
 
     function boot() {
-      // 初次全量扫描
       scanAll();
 
-      // 监听 DOM 变化 (兼容 ThreadTree 多页拉取及 HotRoom 高赞动态生成)
       const observer = new MutationObserver((mutations) => {
         let shouldScan = false;
         for (const m of mutations) {
