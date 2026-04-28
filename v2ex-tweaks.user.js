@@ -523,6 +523,161 @@
 
     const BASE64_RE = /[A-Za-z0-9+/=]+/g;
 
+    // ── 工具：content-type 检测 ──────────────────────────────
+    function detectType(str) {
+      if (/^https?:\/\//i.test(str)) return 'url';
+      try { JSON.parse(str); return 'json'; } catch (_) {}
+      return 'text';
+    }
+
+    const TYPE_ICON  = { url: '🔗', json: '{}', text: '🔓' };
+    const TYPE_LABEL = { url: '链接', json: 'JSON', text: '文本' };
+
+    // ── 工具：简易 JSON 着色 ─────────────────────────────────
+    function highlightJson(json) {
+      const escaped = json
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return escaped.replace(
+        /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
+        (match) => {
+          if (/^"/.test(match)) {
+            return /:$/.test(match)
+              ? `<span class="b64-json-key">${match}</span>`
+              : `<span class="b64-json-str">${match}</span>`;
+          }
+          if (/true|false/.test(match)) return `<span class="b64-json-bool">${match}</span>`;
+          if (/null/.test(match))       return `<span class="b64-json-null">${match}</span>`;
+          return `<span class="b64-json-num">${match}</span>`;
+        }
+      );
+    }
+
+    // ── 工具：格式化展示文本 ─────────────────────────────────
+    function formatForPopover(decoded, type) {
+      if (type === 'json') {
+        try {
+          const pretty = JSON.stringify(JSON.parse(decoded), null, 2);
+          return { html: true, content: highlightJson(pretty) };
+        } catch (_) {}
+      }
+      return { html: false, content: decoded };
+    }
+
+    // ── 弹出气泡开关 ─────────────────────────────────────────
+    function togglePopover(badge) {
+      const isOpen = badge.classList.toggle('pop-open');
+      // 点击 badge 外部关闭
+      if (isOpen) {
+        const close = (e) => {
+          if (!badge.contains(e.target)) {
+            badge.classList.remove('pop-open');
+            document.removeEventListener('mousedown', close);
+          }
+        };
+        setTimeout(() => document.addEventListener('mousedown', close), 0);
+      }
+    }
+
+    // ── 构建 badge DOM ───────────────────────────────────────
+    function makeBadge(raw, decoded) {
+      const type = detectType(decoded);
+      const isLong = decoded.length > 40;
+
+      const wrap = document.createElement('span');
+      wrap.className = 'v2-b64-badge';
+      wrap.dataset.b64type = type;
+      wrap.title = `base64 解码 · ${TYPE_LABEL[type]}\n原文：${raw}`;
+
+      // ① 类型图标
+      const icon = document.createElement('span');
+      icon.className = 'v2-b64-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = TYPE_ICON[type];
+      wrap.appendChild(icon);
+
+      // ② 解码文本（截断显示）
+      const label = document.createElement('span');
+      label.className = 'v2-b64-text';
+      label.textContent = decoded;
+      wrap.appendChild(label);
+
+      // ③ 操作按钮区
+      const actions = document.createElement('span');
+      actions.className = 'v2-b64-actions';
+
+      // 展开按钮（长文本 或 JSON 时显示）
+      if (isLong || type === 'json') {
+        const btnExpand = document.createElement('button');
+        btnExpand.className = 'v2-b64-btn';
+        btnExpand.type = 'button';
+        btnExpand.title = '展开查看';
+        btnExpand.textContent = type === 'json' ? '预览' : '展开';
+        btnExpand.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          togglePopover(wrap);
+        });
+        actions.appendChild(btnExpand);
+      }
+
+      // 复制按钮
+      const btnCopy = document.createElement('button');
+      btnCopy.className = 'v2-b64-btn';
+      btnCopy.type = 'button';
+      btnCopy.title = '复制解码内容';
+      btnCopy.textContent = '复制';
+      btnCopy.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        GM_setClipboard(decoded);
+        btnCopy.textContent = '✓';
+        setTimeout(() => (btnCopy.textContent = '复制'), 1200);
+      });
+      actions.appendChild(btnCopy);
+
+      // URL 时显示"打开"链接
+      if (type === 'url') {
+        try {
+          const url = new URL(decoded); // 验证合法性
+          if (url.protocol === 'https:' || url.protocol === 'http:') {
+            const a = document.createElement('a');
+            a.className = 'v2-b64-link';
+            a.textContent = '打开';
+            a.href = decoded;
+            a.target = '_blank';
+            a.rel = 'noreferrer noopener';
+            a.title = decoded;
+            actions.appendChild(a);
+          }
+        } catch (_) {}
+      }
+
+      wrap.appendChild(actions);
+
+      // ④ 弹出气泡（展开内容 / JSON 格式化）
+      if (isLong || type === 'json') {
+        const popover = document.createElement('div');
+        popover.className = `v2-b64-popover${type === 'json' ? ' is-json' : ''}`;
+
+        const fmt = formatForPopover(decoded, type);
+        if (fmt.html) {
+          popover.innerHTML = fmt.content;
+        } else {
+          popover.textContent = fmt.content;
+        }
+
+        // 防止气泡内点击关闭气泡
+        popover.addEventListener('mousedown', (e) => e.stopPropagation());
+
+        wrap.appendChild(popover);
+      }
+
+      return wrap;
+    }
+
+    // ── 解码尝试 ─────────────────────────────────────────────
     function customEscape(str) {
       return str.replace(
         /[^a-zA-Z0-9_.!~*'()-]/g,
@@ -551,41 +706,7 @@
       }
     }
 
-    function makeBadge(raw, decoded) {
-      const wrap = document.createElement('span');
-      wrap.className = 'v2-b64-badge';
-      wrap.title = `base64: ${raw}`;
-
-      const label = document.createElement('span');
-      label.className = 'v2-b64-text';
-      label.textContent = decoded;
-      wrap.appendChild(label);
-
-      const btnCopy = document.createElement('button');
-      btnCopy.className = 'v2-b64-btn';
-      btnCopy.textContent = '复制';
-      btnCopy.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        GM_setClipboard(decoded);
-        btnCopy.textContent = '已复制';
-        setTimeout(() => (btnCopy.textContent = '复制'), 900);
-      });
-      wrap.appendChild(btnCopy);
-
-      if (/^https?:\/\//i.test(decoded)) {
-        const a = document.createElement('a');
-        a.className = 'v2-b64-link';
-        a.textContent = '打开';
-        a.href = decoded;
-        a.target = '_blank';
-        a.rel = 'noreferrer noopener';
-        wrap.appendChild(a);
-      }
-
-      return wrap;
-    }
-
+    // ── 扫描 DOM ─────────────────────────────────────────────
     function processContent(contentEl) {
       if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
 
@@ -604,7 +725,7 @@
             }
             const p = node.parentElement;
             if (p.closest('.v2-b64-badge')) return NodeFilter.FILTER_REJECT;
-            if (p.closest('a, img')) return NodeFilter.FILTER_REJECT;
+            if (p.closest('a, img'))        return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_ACCEPT;
           },
         }
@@ -624,9 +745,7 @@
         while ((m = BASE64_RE.exec(text)) !== null) {
           const candidate = m[0];
 
-          if (excludeTextList.some((excludeText) => excludeText.includes(candidate))) {
-            continue;
-          }
+          if (excludeTextList.some((ex) => ex.includes(candidate))) continue;
 
           const decoded = tryDecode(candidate);
           if (!decoded) continue;
@@ -656,10 +775,7 @@
     const scheduleScan = () => {
       if (scheduled) return;
       scheduled = true;
-      setTimeout(() => {
-        scheduled = false;
-        scanAll();
-      }, 60);
+      setTimeout(() => { scheduled = false; scanAll(); }, 60);
     };
 
     function boot() {
@@ -667,8 +783,8 @@
       scanAll();
       const root = document.querySelector('#Main') || document.body;
       const observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-          if (m.type === 'childList' && (m.addedNodes?.length || m.removedNodes?.length)) {
+        for (const mut of mutations) {
+          if (mut.type === 'childList' && (mut.addedNodes?.length || mut.removedNodes?.length)) {
             scheduleScan();
             break;
           }
