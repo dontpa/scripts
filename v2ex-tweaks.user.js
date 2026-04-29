@@ -274,12 +274,13 @@
       word-break: break-all;
     }
 
-    /* URL → 普通可点击链接 */
+    /* URL → 可点击链接，颜色与脚本 --new-accent 蓝色系一致 */
     .v2-b64-link {
-      color: #1677ff !important;
+      color: #4a7af0 !important;
       text-decoration: none;
     }
     .v2-b64-link:hover {
+      color: #3060d8 !important;
       text-decoration: underline;
     }
 
@@ -287,29 +288,30 @@
     .v2-b64-plain {
       text-decoration: underline;
       text-decoration-style: dotted;
-      text-decoration-color: #aaa;
+      text-decoration-color: #8aa8f8;
       text-underline-offset: 2px;
       cursor: help;
     }
 
-    /* b64 来源角标：极小，不抢眼，点不到 */
+    /* b64 来源角标：放在内容左侧，与脚本蓝色体系协调 */
     .v2-b64-mark {
       display: inline-block;
       font-size: 9px;
-      font-weight: 600;
+      font-weight: 700;
       font-style: normal;
-      color: #bbb;
-      border: 1px solid #e5e7eb;
+      color: #8aa8f8;
+      border: 1px solid #d0defe;
       border-radius: 2px;
-      padding: 0 2px;
+      padding: 0 3px;
       line-height: 13px;
       vertical-align: middle;
       position: relative;
       top: -1px;
-      margin-left: 3px;
+      margin-right: 4px;
       cursor: default;
       user-select: none;
       text-decoration: none !important;
+      letter-spacing: 0.2px;
     }
 
     /* ===== 高赞阅览室 ===== */
@@ -575,8 +577,8 @@
 
     // ── 构建替换节点 ──────────────────────────────────────────
     //
-    // URL  → <span><a href="...">decoded</a><span class="v2-b64-mark">b64</span></span>
-    // text → <span><span class="v2-b64-plain" title="...">decoded</span><span class="v2-b64-mark">b64</span></span>
+    // URL  → <span><span class="v2-b64-mark">b64</span><a href="...">decoded</a></span>
+    // text → <span><span class="v2-b64-mark">b64</span><span class="v2-b64-plain" title="...">decoded</span></span>
     // JSON → 同 text，title 附加格式化 JSON
     //
     // 返回 null 表示不应替换（URL 格式验证失败等）
@@ -621,12 +623,12 @@
         wrap.appendChild(span);
       }
 
-      // 来源角标
+      // 来源角标：插到最前面（左侧）
       const mark = document.createElement('span');
       mark.className = 'v2-b64-mark';
       mark.textContent = 'b64';
       mark.title = `由 base64 解码\n原文：${raw}`;
-      wrap.appendChild(mark);
+      wrap.prepend(mark);
 
       return wrap;
     }
