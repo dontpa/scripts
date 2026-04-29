@@ -77,7 +77,7 @@
     /* 可折叠的缩进线：hover 时变蓝，提示可点击 */
     /* cursor: pointer 只作用于左侧 20px 伪元素，与 JS 的判断区域对齐 */
     .reply-children.collapsible {
-      cursor: default;
+      cursor: auto;
     }
     .reply-children.collapsible::before {
       content: '';
