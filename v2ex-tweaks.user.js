@@ -294,13 +294,16 @@
       text-decoration: underline;
     }
 
-    /* 纯文本 / JSON → 带点状下划线，hover 提示原文 */
+    /* 纯文本 / JSON → 淡底色标注，不再用虚线 */
     .v2-b64-plain {
-      text-decoration: underline;
-      text-decoration-style: dotted;
-      text-decoration-color: #8aa8f8;
-      text-underline-offset: 2px;
-      cursor: help;
+      background: rgba(74, 122, 240, 0.08);
+      border-radius: 3px;
+      padding: 0 3px;
+      color: #3a5ab8;
+      cursor: default;
+    }
+    .v2-b64-plain:hover {
+      background: rgba(74, 122, 240, 0.14);
     }
 
     /* b64 来源角标：放在内容左侧，与脚本蓝色体系协调 */
@@ -637,7 +640,21 @@
       const mark = document.createElement('span');
       mark.className = 'v2-b64-mark';
       mark.textContent = 'b64';
-      mark.title = `由 base64 解码\n原文：${raw}`;
+      mark.style.cursor = 'pointer';
+      mark.title = `点击复制原始 base64\n原文：${raw}`;
+      mark.addEventListener('click', (e) => {
+        e.stopPropagation();
+        GM_setClipboard(raw);
+        const prev = mark.textContent;
+        mark.textContent = '✓';
+        mark.style.color = '#52c41a';
+        mark.style.borderColor = '#b7eb8f';
+        setTimeout(() => {
+          mark.textContent = prev;
+          mark.style.color = '';
+          mark.style.borderColor = '';
+        }, 1200);
+      });
       wrap.prepend(mark);
 
       return wrap;
