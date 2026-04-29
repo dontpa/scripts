@@ -306,6 +306,42 @@
       background: rgba(74, 122, 240, 0.14);
     }
 
+    /* 容器需要相对定位，才能让复制按钮绝对定位 */
+    .v2-b64-wrap {
+      position: relative;
+      display: inline;
+    }
+
+    /* hover 时出现的复制按钮 */
+    .v2-b64-copy-btn {
+      display: none;
+      position: absolute;
+      top: -18px;
+      right: 0;
+      font-size: 10px;
+      padding: 1px 6px;
+      background: #fff;
+      border: 1px solid #c8d8ff;
+      border-radius: 4px;
+      color: #4a7af0;
+      cursor: pointer;
+      white-space: nowrap;
+      box-shadow: 0 1px 4px rgba(74,122,240,0.12);
+      z-index: 10;
+      line-height: 16px;
+      user-select: none;
+    }
+    .v2-b64-wrap:hover .v2-b64-copy-btn {
+      display: inline-block;
+    }
+    .v2-b64-copy-btn:hover {
+      background: #eef2ff;
+    }
+    .v2-b64-copy-btn.copied {
+      color: #52c41a;
+      border-color: #b7eb8f;
+    }
+
     /* b64 来源角标：放在内容左侧，与脚本蓝色体系协调 */
     .v2-b64-mark {
       display: inline-block;
@@ -656,6 +692,22 @@
         }, 1200);
       });
       wrap.prepend(mark);
+
+      // 复制按钮（hover 浮现）
+      const copyBtn = document.createElement('span');
+      copyBtn.className = 'v2-b64-copy-btn';
+      copyBtn.textContent = '复制原文';
+      copyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        GM_setClipboard(raw);
+        copyBtn.textContent = '已复制 ✓';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.textContent = '复制原文';
+          copyBtn.classList.remove('copied');
+        }, 1200);
+      });
+      wrap.appendChild(copyBtn);
 
       return wrap;
     }
