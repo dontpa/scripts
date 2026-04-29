@@ -696,14 +696,14 @@
       // 复制按钮（hover 浮现）
       const copyBtn = document.createElement('span');
       copyBtn.className = 'v2-b64-copy-btn';
-      copyBtn.textContent = '复制原文';
+      copyBtn.textContent = 'Copy';
       copyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         GM_setClipboard(raw);
-        copyBtn.textContent = '已复制 ✓';
+        copyBtn.textContent = 'Copied ✓';
         copyBtn.classList.add('copied');
         setTimeout(() => {
-          copyBtn.textContent = '复制原文';
+          copyBtn.textContent = 'Copy';
           copyBtn.classList.remove('copied');
         }, 1200);
       });
