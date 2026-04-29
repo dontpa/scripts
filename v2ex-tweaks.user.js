@@ -267,140 +267,50 @@
       transition: outline 0.15s ease;
     }
 
- ===== Base64 Badge" 段
-// 以及整个 "// 3) 功能B" 模块
-// ============================================================
+     /* ===== Base64 原地解码 ===== */
 
-
-// ── A) 样式（替换原 Base64 Badge 样式段）──────────────────────
-
-/*
-    /* ===== Base64 Badge v3 ===== */
-
-    /* ── 内联 badge：极简药丸，不破坏行内布局 ── */
-    .v2-b64 {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      padding: 1px 6px 1px 4px;
-      margin: 0 3px;
-      border-radius: 4px;
-      font-size: 11.5px;
-      line-height: 1.6;
-      vertical-align: middle;
-      cursor: pointer;
-      user-select: none;
-      white-space: nowrap;
-      max-width: 220px;
-      border: 1px solid;
-      transition: opacity 0.12s;
-    }
-    .v2-b64:hover { opacity: 0.75; }
-
-    /* 类型配色 */
-    .v2-b64[data-t="url"]  { color: #1677ff; background: #eff6ff; border-color: #bfdbfe; }
-    .v2-b64[data-t="json"] { color: #7c3aed; background: #f5f3ff; border-color: #ddd6fe; }
-    .v2-b64[data-t="text"] { color: #374151; background: #f3f4f6; border-color: #e5e7eb; }
-
-    .v2-b64-icon { font-style: normal; font-size: 11px; flex-shrink: 0; }
-
-    .v2-b64-label {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-family: "SF Mono", "Fira Code", Consolas, monospace;
-      min-width: 0;
+    /* 包裹容器：允许长 URL 换行，避免溢出 */
+    .v2-b64-wrap {
+      word-break: break-all;
     }
 
-    /* ── 全局弹层（fixed，脱离文档流）── */
-    #v2-b64-pop {
-      position: fixed;
-      z-index: 2147483647;
-      max-width: min(480px, 90vw);
-      max-height: 60vh;
-      overflow: auto;
-      background: #fff;
-      border: 1px solid #e5e7eb;
-      border-radius: 8px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.08);
-      display: none;
-    }
-    #v2-b64-pop.show { display: block; animation: b64pop .12s ease; }
-
-    @keyframes b64pop {
-      from { opacity: 0; transform: translateY(-4px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    /* 弹层头部 */
-    .b64pop-head {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border-bottom: 1px solid #f3f4f6;
-      font-size: 11px;
-      color: #9ca3af;
-      user-select: none;
-    }
-    .b64pop-type {
-      font-weight: 600;
-      padding: 1px 6px;
-      border-radius: 3px;
-      font-size: 10px;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-    }
-    [data-pt="url"]  .b64pop-type { color: #1677ff; background: #eff6ff; }
-    [data-pt="json"] .b64pop-type { color: #7c3aed; background: #f5f3ff; }
-    [data-pt="text"] .b64pop-type { color: #374151; background: #f3f4f6; }
-
-    .b64pop-actions { margin-left: auto; display: flex; gap: 6px; }
-    .b64pop-btn {
-      padding: 2px 8px;
-      border-radius: 4px;
-      border: 1px solid #e5e7eb;
-      background: #fff;
-      font-size: 11px;
-      cursor: pointer;
-      color: #374151;
-      transition: background 0.1s;
+    /* URL → 普通可点击链接 */
+    .v2-b64-link {
+      color: #1677ff !important;
       text-decoration: none;
+    }
+    .v2-b64-link:hover {
+      text-decoration: underline;
+    }
+
+    /* 纯文本 / JSON → 带点状下划线，hover 提示原文 */
+    .v2-b64-plain {
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-decoration-color: #aaa;
+      text-underline-offset: 2px;
+      cursor: help;
+    }
+
+    /* b64 来源角标：极小，不抢眼，点不到 */
+    .v2-b64-mark {
       display: inline-block;
-      line-height: 1.6;
+      font-size: 9px;
+      font-weight: 600;
+      font-style: normal;
+      color: #bbb;
+      border: 1px solid #e5e7eb;
+      border-radius: 2px;
+      padding: 0 2px;
+      line-height: 13px;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+      margin-left: 3px;
+      cursor: default;
+      user-select: none;
+      text-decoration: none !important;
     }
-    .b64pop-btn:hover { background: #f9fafb; }
-    .b64pop-btn.ok   { color: #059669; border-color: #a7f3d0; background: #f0fdf4; }
-
-    /* 弹层内容区 */
-    .b64pop-body {
-      padding: 10px 12px;
-      font-size: 12.5px;
-      line-height: 1.7;
-      word-break: break-all;
-      white-space: pre-wrap;
-      color: #1f2937;
-      font-family: "SF Mono", "Fira Code", Consolas, monospace;
-      user-select: text;
-      cursor: text;
-    }
-    /* JSON 着色 */
-    .b64pop-body.is-json { color: #374151; }
-    .jk  { color: #1677ff; }   /* key   */
-    .js  { color: #059669; }   /* string */
-    .jn  { color: #d97706; }   /* number */
-    .jb  { color: #dc2626; }   /* bool  */
-    .jnl { color: #9ca3af; }   /* null  */
-
-    /* URL 特殊展示 */
-    .b64pop-url-link {
-      color: #1677ff;
-      word-break: break-all;
-      text-decoration: none;
-      font-size: 12.5px;
-      font-family: "SF Mono", "Fira Code", Consolas, monospace;
-    }
-    .b64pop-url-link:hover { text-decoration: underline; }
 
     /* ===== 高赞阅览室 ===== */
     #v2ex-hot-btn {
@@ -633,16 +543,14 @@
 
     const BASE64_RE = /[A-Za-z0-9+/=]+/g;
 
-    // ── 类型检测 ──────────────────────────────────────────────
+    // ── 内容类型判断 ──────────────────────────────────────────
     function detectType(s) {
       if (/^https?:\/\//i.test(s)) return 'url';
       try { JSON.parse(s); return 'json'; } catch (_) {}
       return 'text';
     }
 
-    const TYPE_ICON = { url: '🔗', json: '{}', text: '✦' };
-
-    // ── 解码 ──────────────────────────────────────────────────
+    // ── 解码（与原版逻辑一致）────────────────────────────────
     function customEscape(str) {
       return str.replace(
         /[^a-zA-Z0-9_.!~*'()-]/g,
@@ -665,166 +573,65 @@
       } catch (_) { return null; }
     }
 
-    // ── JSON 语法着色 ─────────────────────────────────────────
-    function highlightJson(raw) {
-      try {
-        const pretty = JSON.stringify(JSON.parse(raw), null, 2);
-        const esc = pretty.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        return esc.replace(
-          /("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
-          (m) => {
-            if (/^"/.test(m)) return /:$/.test(m) ? `<span class="jk">${m}</span>` : `<span class="js">${m}</span>`;
-            if (/true|false/.test(m)) return `<span class="jb">${m}</span>`;
-            if (/null/.test(m))       return `<span class="jnl">${m}</span>`;
-            return `<span class="jn">${m}</span>`;
-          }
-        );
-      } catch (_) { return raw; }
-    }
-
-    // ── 全局弹层单例 ──────────────────────────────────────────
-    let popEl = null;
-    let closeHandler = null;
-
-    function getPopover() {
-      if (!popEl) {
-        popEl = document.createElement('div');
-        popEl.id = 'v2-b64-pop';
-        document.body.appendChild(popEl);
-      }
-      return popEl;
-    }
-
-    function closePopover() {
-      if (!popEl) return;
-      popEl.classList.remove('show');
-      if (closeHandler) {
-        document.removeEventListener('mousedown', closeHandler);
-        document.removeEventListener('scroll', closeHandler, true);
-        closeHandler = null;
-      }
-    }
-
-    function openPopover(badge, decoded, type) {
-      const pop = getPopover();
-      pop.dataset.pt = type;
-      pop.dataset.src = badge.dataset.raw || '';
-
-      // ── 构建内容 ──
-      const typeLabel = { url: 'URL', json: 'JSON', text: 'TEXT' }[type];
-
-      let headHtml = `
-        <div class="b64pop-head">
-          <span class="b64pop-type">${typeLabel}</span>
-          <div class="b64pop-actions">
-      `;
-
-      if (type === 'url') {
-        try {
-          const u = new URL(decoded);
-          if (u.protocol === 'https:' || u.protocol === 'http:') {
-            headHtml += `<a class="b64pop-btn" href="${decoded}" target="_blank" rel="noreferrer noopener">打开 ↗</a>`;
-          }
-        } catch (_) {}
-      }
-
-      headHtml += `<button class="b64pop-btn" id="b64-copy-btn">复制</button></div></div>`;
-
-      let bodyHtml = '';
-      if (type === 'url') {
-        bodyHtml = `<div class="b64pop-body"><a class="b64pop-url-link" href="${decoded}" target="_blank" rel="noreferrer noopener">${decoded}</a></div>`;
-      } else if (type === 'json') {
-        bodyHtml = `<div class="b64pop-body is-json">${highlightJson(decoded)}</div>`;
-      } else {
-        const safe = decoded.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        bodyHtml = `<div class="b64pop-body">${safe}</div>`;
-      }
-
-      pop.innerHTML = headHtml + bodyHtml;
-
-      // 复制按钮
-      pop.querySelector('#b64-copy-btn')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        GM_setClipboard(decoded);
-        const btn = pop.querySelector('#b64-copy-btn');
-        btn.textContent = '已复制 ✓';
-        btn.classList.add('ok');
-        setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1400);
-      });
-
-      // ── 定位（badge 正下方，防止溢出视窗）──
-      pop.classList.remove('show');
-      pop.style.left = '0';
-      pop.style.top = '0';
-      pop.style.maxWidth = '';
-      document.body.appendChild(pop); // 确保在 body 末尾
-
-      pop.classList.add('show');
-
-      const br = badge.getBoundingClientRect();
-      const pw = pop.offsetWidth;
-      const ph = pop.offsetHeight;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-
-      let left = br.left;
-      let top  = br.bottom + 6;
-
-      // 右侧溢出
-      if (left + pw > vw - 8) left = Math.max(8, vw - pw - 8);
-      // 下方溢出 → 改为显示在 badge 上方
-      if (top + ph > vh - 8) top = Math.max(8, br.top - ph - 6);
-
-      pop.style.left = `${left}px`;
-      pop.style.top  = `${top}px`;
-
-      // ── 点击外部或滚动时关闭 ──
-      setTimeout(() => {
-        closeHandler = (e) => {
-          if (!pop.contains(e.target) && e.target !== badge) closePopover();
-        };
-        document.addEventListener('mousedown', closeHandler);
-        document.addEventListener('scroll', closeHandler, { capture: true, passive: true });
-      }, 0);
-    }
-
-    // ── 构建内联 badge ────────────────────────────────────────
-    function makeBadge(raw, decoded) {
+    // ── 构建替换节点 ──────────────────────────────────────────
+    //
+    // URL  → <span><a href="...">decoded</a><span class="v2-b64-mark">b64</span></span>
+    // text → <span><span class="v2-b64-plain" title="...">decoded</span><span class="v2-b64-mark">b64</span></span>
+    // JSON → 同 text，title 附加格式化 JSON
+    //
+    // 返回 null 表示不应替换（URL 格式验证失败等）
+    //
+    function makeReplacement(raw, decoded) {
       const type = detectType(decoded);
 
-      const badge = document.createElement('span');
-      badge.className = 'v2-b64';
-      badge.dataset.t = type;
-      badge.dataset.raw = raw;
-      badge.title = '点击查看解码内容';
+      const wrap = document.createElement('span');
+      wrap.className = 'v2-b64-wrap';
 
-      const icon = document.createElement('span');
-      icon.className = 'v2-b64-icon';
-      icon.textContent = TYPE_ICON[type];
+      if (type === 'url') {
+        // 用 URL 构造函数做严格校验
+        let href;
+        try {
+          const u = new URL(decoded);
+          if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+          href = u.href;
+        } catch (_) { return null; }
 
-      const label = document.createElement('span');
-      label.className = 'v2-b64-label';
-      label.textContent = decoded;
+        const a = document.createElement('a');
+        a.className = 'v2-b64-link';
+        a.href = href;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        a.title = href;           // 鼠标悬停显示完整 URL（浏览器状态栏也会显示）
+        a.textContent = decoded;
+        wrap.appendChild(a);
 
-      badge.appendChild(icon);
-      badge.appendChild(label);
-
-      badge.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        // 同一 badge 再点 → 关闭
-        if (popEl?.classList.contains('show') && popEl.dataset.src === raw) {
-          closePopover();
-          return;
+      } else {
+        // text / json：显示解码内容，title 提示原始 base64
+        let titleStr = `base64 解码\n原文：${raw}`;
+        if (type === 'json') {
+          try {
+            titleStr += `\n\n${JSON.stringify(JSON.parse(decoded), null, 2)}`;
+          } catch (_) {}
         }
-        if (popEl) popEl.dataset.src = raw;
-        openPopover(badge, decoded, type);
-      });
 
-      return badge;
+        const span = document.createElement('span');
+        span.className = 'v2-b64-plain';
+        span.textContent = decoded;
+        span.title = titleStr;
+        wrap.appendChild(span);
+      }
+
+      // 来源角标
+      const mark = document.createElement('span');
+      mark.className = 'v2-b64-mark';
+      mark.textContent = 'b64';
+      mark.title = `由 base64 解码\n原文：${raw}`;
+      wrap.appendChild(mark);
+
+      return wrap;
     }
 
-    // ── DOM 扫描（与原版逻辑相同）────────────────────────────
+    // ── 扫描单个内容块 ────────────────────────────────────────
     function processContent(contentEl) {
       if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
 
@@ -834,13 +641,14 @@
       ].map((el) => el.outerHTML);
 
       const walker = document.createTreeWalker(
-        contentEl, NodeFilter.SHOW_TEXT,
+        contentEl,
+        NodeFilter.SHOW_TEXT,
         {
           acceptNode(node) {
             if (!node.nodeValue || node.nodeValue.length <= CFG.MIN_LEN) return NodeFilter.FILTER_REJECT;
             const p = node.parentElement;
-            if (p.closest('.v2-b64'))    return NodeFilter.FILTER_REJECT;
-            if (p.closest('a, img'))     return NodeFilter.FILTER_REJECT;
+            if (p.closest('.v2-b64-wrap')) return NodeFilter.FILTER_REJECT;
+            if (p.closest('a, img'))       return NodeFilter.FILTER_REJECT;
             return NodeFilter.FILTER_ACCEPT;
           },
         }
@@ -859,13 +667,18 @@
         let m;
         while ((m = BASE64_RE.exec(text)) !== null) {
           const candidate = m[0];
+
           if (excludeTextList.some((ex) => ex.includes(candidate))) continue;
+
           const decoded = tryDecode(candidate);
           if (!decoded) continue;
 
+          const replacement = makeReplacement(candidate, decoded);
+          if (!replacement) continue;   // URL 验证失败，跳过
+
           changed = true;
           frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-          frag.appendChild(makeBadge(candidate, decoded));
+          frag.appendChild(replacement);
           last = m.index + candidate.length;
         }
 
@@ -878,6 +691,7 @@
       contentEl.dataset.v2b64scanned = '1';
     }
 
+    // ── 批量扫描 + MutationObserver 监听动态内容 ─────────────
     function scanAll() {
       for (const sel of CFG.TARGET_SELECTORS) {
         document.querySelectorAll(sel).forEach(processContent);
@@ -898,7 +712,8 @@
       new MutationObserver((mutations) => {
         for (const mut of mutations) {
           if (mut.type === 'childList' && (mut.addedNodes?.length || mut.removedNodes?.length)) {
-            scheduleScan(); break;
+            scheduleScan();
+            break;
           }
         }
       }).observe(root, { childList: true, subtree: true });
