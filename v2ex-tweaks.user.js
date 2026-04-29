@@ -75,7 +75,17 @@
     }
 
     /* 可折叠的缩进线：hover 时变蓝，提示可点击 */
+    /* cursor: pointer 只作用于左侧 20px 伪元素，与 JS 的判断区域对齐 */
     .reply-children.collapsible {
+      cursor: default;
+    }
+    .reply-children.collapsible::before {
+      content: '';
+      position: absolute;
+      left: -2px;   /* 盖住 2px 的 border 本身 */
+      top: 0;
+      bottom: 0;
+      width: 20px;
       cursor: pointer;
     }
     .reply-children.collapsible:hover {
