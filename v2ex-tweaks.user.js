@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.2.0
+// @version      2.2.1
 // @description  V2EX 日常增强：回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -256,28 +256,33 @@
       margin-right: 4px; cursor: default; user-select: none;
       text-decoration: none !important; letter-spacing: 0.2px;
     }
-    .v2-b64-copy-btn {
+    .v2-b64-actions {
       display: none;
       position: absolute;
-      top: -20px;
+      top: -22px;
       right: 0;
-      font-size: 10px;
-      padding: 1px 7px;
+      align-items: center;
       background: #fff;
       border: 1px solid #c8d8ff;
       border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 1px 6px rgba(74,122,240,0.13);
+      z-index: 10;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .v2-b64-action {
+      font-size: 10px;
+      padding: 1px 7px;
       color: #4a7af0;
       cursor: pointer;
       white-space: nowrap;
-      box-shadow: 0 1px 6px rgba(74,122,240,0.13);
-      z-index: 10;
       line-height: 17px;
       user-select: none;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    .v2-b64-wrap:hover .v2-b64-copy-btn { display: inline-block; }
-    .v2-b64-copy-btn:hover { background: #eef2ff; }
-    .v2-b64-copy-btn.copied { color: #52c41a; border-color: #b7eb8f; }
+    .v2-b64-action + .v2-b64-action { border-left: 1px solid #dbe5ff; }
+    .v2-b64-wrap:hover .v2-b64-actions { display: inline-flex; }
+    .v2-b64-action:hover { background: #eef2ff; }
+    .v2-b64-action.copied { color: #52c41a; }
 
     /* ===== 悬停引用预览 ===== */
     #v2ex-ref-preview {
@@ -495,21 +500,36 @@
       mark.title = `decoded from base64\n${raw}`;
       wrap.prepend(mark);
 
-      // copy btn：hover 时浮现，点击复制原始 base64
-      const copyBtn = document.createElement('span');
-      copyBtn.className = 'v2-b64-copy-btn';
-      copyBtn.textContent = 'copy';
-      copyBtn.addEventListener('click', e => {
+      function createCopyAction(label, copiedLabel, clipboardText, title) {
+        const btn = document.createElement('span');
+        btn.className = 'v2-b64-action';
+        btn.textContent = label;
+        btn.title = title;
+        btn.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          GM_setClipboard(clipboardText);
+          btn.textContent = copiedLabel;
+          btn.classList.add('copied');
+          clearTimeout(btn._v2CopyTimer);
+          btn._v2CopyTimer = setTimeout(() => {
+            btn.textContent = label;
+            btn.classList.remove('copied');
+          }, 1200);
+        });
+        return btn;
+      }
+
+      // copy 是主动作：复制当前展示的解码结果；raw 才复制原始 base64。
+      const actions = document.createElement('span');
+      actions.className = 'v2-b64-actions';
+      actions.appendChild(createCopyAction('copy', 'copied', decoded, '复制解码后的内容'));
+      actions.appendChild(createCopyAction('raw', 'copied', raw, '复制原始 base64'));
+      actions.addEventListener('click', e => {
+        e.preventDefault();
         e.stopPropagation();
-        GM_setClipboard(raw);
-        copyBtn.textContent = 'copied ✓';
-        copyBtn.classList.add('copied');
-        setTimeout(() => {
-          copyBtn.textContent = 'copy';
-          copyBtn.classList.remove('copied');
-        }, 1200);
       });
-      wrap.appendChild(copyBtn);
+      wrap.appendChild(actions);
 
       return wrap;
     }
