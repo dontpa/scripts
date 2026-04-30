@@ -232,13 +232,21 @@
     .reply-nav-active > .cell { outline: 2px solid rgba(74,122,240,0.50) !important; outline-offset: -2px; transition: outline 0.15s ease; }
 
     /* ===== Base64 解码 ===== */
-    .v2-b64-wrap { word-break: break-all; }
+    .v2-b64-wrap {
+      word-break: break-all;
+      position: relative;
+      display: inline;
+    }
     .v2-b64-link { color: #4a7af0 !important; text-decoration: none; }
     .v2-b64-link:hover { color: #3060d8 !important; text-decoration: underline; }
     .v2-b64-plain {
-      text-decoration: underline; text-decoration-style: dotted;
-      text-decoration-color: #8aa8f8; text-underline-offset: 2px; cursor: help;
+      background: rgba(74, 122, 240, 0.08);
+      border-radius: 3px;
+      padding: 0 3px;
+      color: #3a5ab8;
+      cursor: default;
     }
+    .v2-b64-plain:hover { background: rgba(74, 122, 240, 0.14); }
     .v2-b64-mark {
       display: inline-block;
       font-size: 9px; font-weight: 700; font-style: normal;
@@ -248,6 +256,28 @@
       margin-right: 4px; cursor: default; user-select: none;
       text-decoration: none !important; letter-spacing: 0.2px;
     }
+    .v2-b64-copy-btn {
+      display: none;
+      position: absolute;
+      top: -20px;
+      right: 0;
+      font-size: 10px;
+      padding: 1px 7px;
+      background: #fff;
+      border: 1px solid #c8d8ff;
+      border-radius: 4px;
+      color: #4a7af0;
+      cursor: pointer;
+      white-space: nowrap;
+      box-shadow: 0 1px 6px rgba(74,122,240,0.13);
+      z-index: 10;
+      line-height: 17px;
+      user-select: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .v2-b64-wrap:hover .v2-b64-copy-btn { display: inline-block; }
+    .v2-b64-copy-btn:hover { background: #eef2ff; }
+    .v2-b64-copy-btn.copied { color: #52c41a; border-color: #b7eb8f; }
 
     /* ===== 悬停引用预览 ===== */
     #v2ex-ref-preview {
@@ -455,19 +485,32 @@
         a.title = href; a.textContent = decoded;
         wrap.appendChild(a);
       } else {
-        let titleStr = `base64 解码\n原文：${raw}`;
-        if (type === 'json') {
-          try { titleStr += `\n\n${JSON.stringify(JSON.parse(decoded), null, 2)}`; } catch (_) {}
-        }
         const span = document.createElement('span');
         span.className = 'v2-b64-plain';
-        span.textContent = decoded; span.title = titleStr;
+        span.textContent = decoded;
         wrap.appendChild(span);
       }
       const mark = document.createElement('span');
       mark.className = 'v2-b64-mark'; mark.textContent = 'b64';
-      mark.title = `由 base64 解码\n原文：${raw}`;
+      mark.title = `decoded from base64\n${raw}`;
       wrap.prepend(mark);
+
+      // copy btn：hover 时浮现，点击复制原始 base64
+      const copyBtn = document.createElement('span');
+      copyBtn.className = 'v2-b64-copy-btn';
+      copyBtn.textContent = 'copy';
+      copyBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        GM_setClipboard(raw);
+        copyBtn.textContent = 'copied ✓';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.textContent = 'copy';
+          copyBtn.classList.remove('copied');
+        }, 1200);
+      });
+      wrap.appendChild(copyBtn);
+
       return wrap;
     }
     function processContent(contentEl) {
