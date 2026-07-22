@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.2.1
+// @version      2.3.0
 // @description  V2EX 日常增强：回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
+// @match        https://edge.v2ex.com/*
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
 // @grant        GM_getValue
@@ -45,6 +46,8 @@
     threadTree: {
       collapseKeyPrefix: 'v2_collapse_',
       readKeyPrefix: 'v2_last_read_',
+      pageFetchConcurrency: 4,
+      pageFetchTimeoutMs: 15000,
     },
   };
 
@@ -65,7 +68,7 @@
   }
 
   function isTopicPage() {
-    return /^\/t\/\d+/.test(location.pathname);
+    return /^\/t\/\d+(?:\/|$)/.test(location.pathname);
   }
 
   // Shannon 熵：衡量字符串的信息多样性
@@ -86,7 +89,7 @@
   // =========================
   // 2) 样式（合并注入）
   // =========================
-  GM_addStyle(`
+  if (isTopicPage()) GM_addStyle(`
     /* ===== 楼层树 ===== */
     :root {
       --indent-width: 16px;
@@ -395,7 +398,7 @@
   // =========================
   const Daily = (() => {
     function isLoggedIn() {
-      return !!document.querySelector('a[href="/signout"]') || !document.querySelector('a[href="/signin"]');
+      return !!document.querySelector('#Top a[href^="/signout"], #Top a[onclick*="/signout?once="]');
     }
     async function fetchText(url) {
       const res = await fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store' });
@@ -404,38 +407,75 @@
     }
     function parseHtml(html) { return new DOMParser().parseFromString(html, 'text/html'); }
     function alreadyRedeemed(doc) {
-      return /已领取|已经领取|每日登录奖励已领取|redeemed|already redeemed|已完成/.test(doc.body?.innerText || '');
+      return /已领取|已经领取|每日登录奖励已领取|redeemed|already redeemed|已完成/i.test(doc.body?.textContent || '');
     }
     function findRedeemUrl(doc) {
       const a = doc.querySelector('a[href^="/mission/daily/redeem"]');
       if (a?.getAttribute('href')) return a.getAttribute('href');
-      const btn = doc.querySelector('input[type="button"][onclick*="redeem"], input[value^="领取"][onclick]');
-      if (btn) { const m = (btn.getAttribute('onclick') || '').match(/'([^']+)'/); if (m?.[1]) return m[1]; }
       const any = [...doc.querySelectorAll('[onclick]')].find(el => (el.getAttribute('onclick') || '').includes('/mission/daily/redeem'));
-      if (any) { const m = (any.getAttribute('onclick') || '').match(/'([^']+)'/); if (m?.[1]) return m[1]; }
+      if (any) {
+        const match = (any.getAttribute('onclick') || '').match(/\/mission\/daily\/redeem[^'"\s)]*/);
+        if (match?.[0]) return match[0];
+      }
       return null;
     }
     async function run() {
       const { notify: doNotify, page, delayMinMs, delayMaxMs, storeKey } = CONFIG.daily;
-      if (!doNotify || !isLoggedIn()) return;
+      if (!isLoggedIn()) return;
       const today = ymdLocal();
       if (GM_getValue(storeKey, '') === today) return;
-      GM_setValue(storeKey, today);
-      await sleep(randInt(delayMinMs, delayMaxMs));
-      const doc1 = parseHtml(await fetchText(page));
-      if (alreadyRedeemed(doc1)) { notify('V2EX 签到', '今日奖励已领取'); return; }
-      const redeemUrl = findRedeemUrl(doc1);
-      if (!redeemUrl) { notify('V2EX 签到', '未找到领取按钮（可能结构变更）'); return; }
-      const doc2 = parseHtml(await fetchText(redeemUrl));
-      notify('V2EX 签到', (alreadyRedeemed(doc2) || /奖励/.test(doc2.body?.innerText || '')) ? '领取成功 ✅' : '已发起领取，请确认');
+      const lockKey = `${storeKey}_lock`;
+      const lock = GM_getValue(lockKey, null);
+      if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) return;
+
+      const token = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      GM_setValue(lockKey, { date: today, startedAt: Date.now(), token });
+      const dailyNotify = text => { if (doNotify) notify('V2EX 签到', text); };
+
+      try {
+        await sleep(randInt(delayMinMs, delayMaxMs));
+        const doc1 = parseHtml(await fetchText(page));
+        if (alreadyRedeemed(doc1)) {
+          GM_setValue(storeKey, today);
+          dailyNotify('今日奖励已领取');
+          return;
+        }
+
+        const redeemUrl = findRedeemUrl(doc1);
+        if (!redeemUrl) {
+          dailyNotify('未找到领取按钮（可能结构变更）');
+          return;
+        }
+
+        const target = new URL(redeemUrl, location.origin);
+        if (target.origin !== location.origin || target.pathname !== '/mission/daily/redeem') {
+          throw new Error('领取地址无效');
+        }
+
+        const doc2 = parseHtml(await fetchText(target.href));
+        let confirmed = alreadyRedeemed(doc2) || /领取成功|成功领取|奖励已发放/.test(doc2.body?.textContent || '');
+        if (!confirmed) {
+          const verifyDoc = parseHtml(await fetchText(page));
+          confirmed = alreadyRedeemed(verifyDoc);
+        }
+        if (confirmed) {
+          GM_setValue(storeKey, today);
+          dailyNotify('领取成功 ✅');
+        } else {
+          dailyNotify('已发起领取，但未能确认结果');
+        }
+      } finally {
+        if (GM_getValue(lockKey, null)?.token === token) GM_setValue(lockKey, null);
+      }
     }
     function boot() {
-      window.addEventListener('load', () => setTimeout(() => {
+      const start = () => setTimeout(() => {
         run().catch(err => {
-          GM_setValue(CONFIG.daily.storeKey, '');
-          notify('V2EX 签到', `失败：${err?.message || err}`);
+          if (CONFIG.daily.notify) notify('V2EX 签到', `失败：${err?.message || err}`);
         });
-      }, 800));
+      }, 800);
+      if (document.readyState === 'complete') start();
+      else window.addEventListener('load', start, { once: true });
     }
     return { boot };
   })();
@@ -444,29 +484,21 @@
   // 4) 功能B：Base64 解码（含 Shannon 熵过滤）
   // =========================
   const B64 = (() => {
-    const BASE64_RE = /[A-Za-z0-9+/=]+/g;
+    const BASE64_RE = /[A-Za-z0-9+/]{8,}={0,2}/g;
+    const VALID_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+    const TARGET_SELECTOR = CONFIG.b64.targetSelectors.join(',');
+    const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
-    function detectType(s) {
-      if (/^https?:\/\//i.test(s)) return 'url';
-      try { JSON.parse(s); return 'json'; } catch (_) {}
-      return 'text';
-    }
-    function customEscape(str) {
-      return str.replace(/[^a-zA-Z0-9_.!~*'()-]/g, c =>
-        `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`
-      );
-    }
     function tryDecode(text) {
       const { minLen, excludeList, entropyThreshold } = CONFIG.b64;
-      if (text.length % 4 !== 0) return null;
       if (text.length <= minLen) return null;
       if (excludeList.includes(text)) return null;
-      if (text.includes('=')) {
-        const pi = text.indexOf('=');
-        if (pi !== text.length - 1 && pi !== text.length - 2) return null;
-      }
+      if (!VALID_BASE64_RE.test(text)) return null;
       try {
-        const d = decodeURIComponent(customEscape(window.atob(text)));
+        const binary = window.atob(text);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const d = UTF8_DECODER.decode(bytes);
         if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(d)) return null;
         // 熵过滤：排除低熵解码（乱码、单调重复字符等误判）
         if (shannonEntropy(d) < entropyThreshold) return null;
@@ -474,10 +506,9 @@
       } catch (_) { return null; }
     }
     function makeReplacement(raw, decoded) {
-      const type = detectType(decoded);
       const wrap = document.createElement('span');
       wrap.className = 'v2-b64-wrap';
-      if (type === 'url') {
+      if (/^https?:\/\//i.test(decoded)) {
         let href;
         try {
           const u = new URL(decoded);
@@ -505,18 +536,9 @@
         btn.className = 'v2-b64-action';
         btn.textContent = label;
         btn.title = title;
-        btn.addEventListener('click', e => {
-          e.preventDefault();
-          e.stopPropagation();
-          GM_setClipboard(clipboardText);
-          btn.textContent = copiedLabel;
-          btn.classList.add('copied');
-          clearTimeout(btn._v2CopyTimer);
-          btn._v2CopyTimer = setTimeout(() => {
-            btn.textContent = label;
-            btn.classList.remove('copied');
-          }, 1200);
-        });
+        btn.dataset.label = label;
+        btn.dataset.copiedLabel = copiedLabel;
+        btn.dataset.clipboardText = clipboardText;
         return btn;
       }
 
@@ -525,80 +547,104 @@
       actions.className = 'v2-b64-actions';
       actions.appendChild(createCopyAction('copy', 'copied', decoded, '复制解码后的内容'));
       actions.appendChild(createCopyAction('raw', 'copied', raw, '复制原始 base64'));
-      actions.addEventListener('click', e => {
-        e.preventDefault();
-        e.stopPropagation();
-      });
       wrap.appendChild(actions);
 
       return wrap;
     }
-    function processContent(contentEl) {
-      if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
-      const excludeTextList = [
-        ...contentEl.getElementsByTagName('a'),
-        ...contentEl.getElementsByTagName('img'),
-      ].map(el => el.outerHTML);
 
-      const walker = document.createTreeWalker(contentEl, NodeFilter.SHOW_TEXT, {
+    function processTextNode(node) {
+      if (!node?.isConnected || !node.nodeValue || node.nodeValue.length <= CONFIG.b64.minLen) return;
+      const parent = node.parentElement;
+      if (!parent || parent.closest('.v2-b64-wrap, .v2-ref-link, a, script, style, textarea')) return;
+
+      const text = node.nodeValue;
+      let last = 0;
+      const frag = document.createDocumentFragment();
+      let changed = false;
+      BASE64_RE.lastIndex = 0;
+      let match;
+      while ((match = BASE64_RE.exec(text)) !== null) {
+        const candidate = match[0];
+        const decoded = tryDecode(candidate);
+        if (!decoded) continue;
+        const replacement = makeReplacement(candidate, decoded);
+        if (!replacement) continue;
+        changed = true;
+        frag.appendChild(document.createTextNode(text.slice(last, match.index)));
+        frag.appendChild(replacement);
+        last = match.index + candidate.length;
+      }
+      if (!changed || !node.parentNode) return;
+      frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+
+    function processSubtree(root) {
+      if (!root) return;
+      if (root.nodeType === Node.TEXT_NODE) {
+        processTextNode(root);
+        return;
+      }
+      if (root.nodeType !== Node.ELEMENT_NODE || root.closest('.v2-b64-wrap, .v2-ref-link')) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
           if (!node.nodeValue || node.nodeValue.length <= CONFIG.b64.minLen) return NodeFilter.FILTER_REJECT;
           const p = node.parentElement;
-          // 跳过已处理的 b64 包裹和 hover 预览引用标注
-          if (p.closest('.v2-b64-wrap, .v2-ref-link')) return NodeFilter.FILTER_REJECT;
-          if (p.closest('a, img')) return NodeFilter.FILTER_REJECT;
+          if (p.closest('.v2-b64-wrap, .v2-ref-link, a, script, style, textarea')) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_ACCEPT;
         },
       });
-
       const nodes = [];
       while (walker.nextNode()) nodes.push(walker.currentNode);
-      nodes.forEach(node => {
-        const text = node.nodeValue;
-        let last = 0;
-        const frag = document.createDocumentFragment();
-        let changed = false;
-        BASE64_RE.lastIndex = 0;
-        let m;
-        while ((m = BASE64_RE.exec(text)) !== null) {
-          const candidate = m[0];
-          if (excludeTextList.some(ex => ex.includes(candidate))) continue;
-          const decoded = tryDecode(candidate);
-          if (!decoded) continue;
-          const replacement = makeReplacement(candidate, decoded);
-          if (!replacement) continue;
-          changed = true;
-          frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-          frag.appendChild(replacement);
-          last = m.index + candidate.length;
-        }
-        if (changed) {
-          frag.appendChild(document.createTextNode(text.slice(last)));
-          node.parentNode.replaceChild(frag, node);
-        }
-      });
+      nodes.forEach(processTextNode);
+    }
+
+    function processContent(contentEl) {
+      if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
+      processSubtree(contentEl);
       contentEl.dataset.v2b64scanned = '1';
     }
+
     function scanAll() {
-      for (const sel of CONFIG.b64.targetSelectors) {
-        document.querySelectorAll(sel).forEach(processContent);
-      }
+      document.querySelectorAll(TARGET_SELECTOR).forEach(processContent);
     }
-    let scheduled = false;
-    const scheduleScan = () => {
-      if (scheduled) return;
-      scheduled = true;
-      setTimeout(() => { scheduled = false; scanAll(); }, 60);
-    };
+
+    function processAddedNode(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.parentElement?.closest(TARGET_SELECTOR)?.dataset.v2b64scanned === '1') processTextNode(node);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      if (node.matches(TARGET_SELECTOR)) processContent(node);
+      node.querySelectorAll(TARGET_SELECTOR).forEach(processContent);
+
+      const owner = node.closest(TARGET_SELECTOR);
+      if (owner?.dataset.v2b64scanned === '1' && node !== owner) processSubtree(node);
+    }
+
     function boot() {
       if (!isTopicPage()) return;
       scanAll();
       const root = document.querySelector('#Main') || document.body;
+      document.addEventListener('click', e => {
+        const btn = e.target.closest?.('.v2-b64-action');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        try { GM_setClipboard(btn.dataset.clipboardText || ''); } catch (err) { log('Clipboard error:', err); return; }
+        btn.textContent = btn.dataset.copiedLabel;
+        btn.classList.add('copied');
+        clearTimeout(btn._v2CopyTimer);
+        btn._v2CopyTimer = setTimeout(() => {
+          if (!btn.isConnected) return;
+          btn.textContent = btn.dataset.label;
+          btn.classList.remove('copied');
+        }, 1200);
+      });
       new MutationObserver(mutations => {
         for (const mut of mutations) {
-          if (mut.type === 'childList' && (mut.addedNodes?.length || mut.removedNodes?.length)) {
-            scheduleScan(); break;
-          }
+          for (const node of mut.addedNodes) processAddedNode(node);
         }
       }).observe(root, { childList: true, subtree: true });
     }
@@ -620,12 +666,14 @@
       const avatarEl  = cell.querySelector('img.avatar');
       if (!contentEl || !authorEl || !floorEl) return null;
 
-      const memberName = authorEl.innerText;
-      const content    = contentEl.innerText;
-      const floor      = floorEl.innerText;
-      const floorNum   = parseInt(floor, 10);
-      const likes      = parseInt(cell.querySelector('span.small')?.innerText || '0', 10);
-      const refMemberNames = [...content.matchAll(/@([a-zA-Z0-9]+)/g)].map(([, n]) => n);
+      const memberName = (authorEl.textContent || '').trim();
+      const content    = contentEl.textContent || '';
+      const floor      = (floorEl.textContent || '').trim();
+      const floorNum   = Number(floor.match(/\d+/)?.[0]);
+      if (!Number.isSafeInteger(floorNum)) return null;
+      const likesText  = cell.querySelector('span.small')?.textContent || '';
+      const likes      = Number(likesText.match(/\d+/)?.[0] || 0);
+      const refMemberNames = [...content.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(([, n]) => n);
       const refFloors      = [...content.matchAll(/#(\d+)/g)].map(([, f]) => f);
 
       return {
@@ -657,34 +705,40 @@
       return { floorMap, nameMap };
     }
 
-    // ── 父节点推断，O(1) 查找 ──
+    function findPreviousCandidate(candidates, index) {
+      if (!candidates?.length) return null;
+      let low = 0;
+      let high = candidates.length - 1;
+      let best = null;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        const candidate = candidates[middle];
+        if (candidate.index < index) {
+          best = candidate;
+          low = middle + 1;
+        } else {
+          high = middle - 1;
+        }
+      }
+      return best;
+    }
+
+    // ── 父节点推断，Map 查找 + 同名候选二分搜索 ──
     function inferParent(reply, { floorMap, nameMap }) {
       const { refMemberNames, refFloors, index, floorNum } = reply;
+      const firstRefFloor = refFloors?.[0] ? Number(refFloors[0]) : null;
+      if (firstRefFloor !== null && firstRefFloor < floorNum) {
+        const exact = floorMap.get(firstRefFloor);
+        if (exact && (!refMemberNames?.length || exact.memberName.toLowerCase() === refMemberNames[0].toLowerCase())) {
+          return exact;
+        }
+      }
       if (!refMemberNames?.length) return null;
 
       const targetName = refMemberNames[0].toLowerCase();
       const candidates = nameMap.get(targetName);
-
-      if (candidates?.length) {
-        const firstRefFloor = refFloors?.[0] ? parseInt(refFloors[0], 10) : null;
-        if (firstRefFloor !== null) {
-          const exact = floorMap.get(firstRefFloor);
-          if (exact && exact.memberName.toLowerCase() === targetName && exact.floorNum < floorNum) return exact;
-        }
-        let best = null;
-        for (const c of candidates) {
-          if (c.index < index && c.floorNum < floorNum) {
-            if (!best || c.index > best.index) best = c;
-          }
-        }
-        return best;
-      }
-
-      if (refFloors?.length) {
-        const targetFloor = parseInt(refFloors[0], 10);
-        if (targetFloor < floorNum) return floorMap.get(targetFloor) ?? null;
-      }
-      return null;
+      const candidate = findPreviousCandidate(candidates, index);
+      return candidate?.floorNum < floorNum ? candidate : null;
     }
 
     // ── 折叠持久化（sessionStorage）──
@@ -694,7 +748,8 @@
       catch { return new Set(); }
     }
     function saveCollapsedSet(topicId, set) {
-      sessionStorage.setItem(collapseKey(topicId), JSON.stringify([...set]));
+      try { sessionStorage.setItem(collapseKey(topicId), JSON.stringify([...set])); }
+      catch (err) { log('Collapse state error:', err); }
     }
 
     // ── 渲染树 ──
@@ -710,13 +765,40 @@
       const collapsedSet = getCollapsedSet(topicId);
       const fragment     = document.createDocumentFragment();
 
-      function toggleCollapse(childrenEl, hint, count, replyId) {
-        const nowCollapsed = childrenEl.classList.toggle('is-collapsed');
-        const set = getCollapsedSet(topicId);
-        if (nowCollapsed) set.add(replyId); else set.delete(replyId);
-        saveCollapsedSet(topicId, set);
-        hint.textContent = nowCollapsed ? `▶ 展开 ${count} 条回复` : `▼ 折叠 ${count} 条回复`;
-        if (!nowCollapsed) setTimeout(() => { hint.textContent = `▶ 展开 ${count} 条回复`; }, 1800);
+      container._v2CollapseState = { topicId, collapsedSet };
+      if (!container._v2CollapseBound) {
+        container._v2CollapseBound = true;
+        container.addEventListener('click', e => {
+          const state = container._v2CollapseState;
+          if (!state) return;
+
+          const clickedHint = e.target.closest?.('.reply-collapsed-hint');
+          let childrenEl = null;
+          let hint = null;
+
+          if (clickedHint && container.contains(clickedHint)) {
+            hint = clickedHint;
+            childrenEl = hint.previousElementSibling;
+          } else {
+            const clickedRail = e.target.closest?.('.reply-children.collapsible');
+            if (!clickedRail || !container.contains(clickedRail)) return;
+            const rect = clickedRail.getBoundingClientRect();
+            if (e.clientX - rect.left > 20) return;
+            childrenEl = clickedRail;
+            hint = childrenEl.nextElementSibling;
+          }
+
+          if (!childrenEl?.classList.contains('reply-children') || !hint?.classList.contains('reply-collapsed-hint')) return;
+          e.preventDefault();
+          e.stopPropagation();
+
+          const replyId = childrenEl.dataset.replyId;
+          const nowCollapsed = childrenEl.classList.toggle('is-collapsed');
+          if (nowCollapsed) state.collapsedSet.add(replyId);
+          else state.collapsedSet.delete(replyId);
+          saveCollapsedSet(state.topicId, state.collapsedSet);
+          hint.textContent = `▶ 展开 ${childrenEl.dataset.replyCount} 条回复`;
+        });
       }
 
       function appendNode(reply, parentEl) {
@@ -730,6 +812,8 @@
           const count      = reply.children.length;
           const childrenEl = document.createElement('div');
           childrenEl.className = 'reply-children collapsible';
+          childrenEl.dataset.replyId = reply.id;
+          childrenEl.dataset.replyCount = String(count);
           reply.children.forEach(child => appendNode(child, childrenEl));
 
           const hint = document.createElement('div');
@@ -738,14 +822,6 @@
 
           // 恢复折叠状态
           if (collapsedSet.has(reply.id)) childrenEl.classList.add('is-collapsed');
-
-          childrenEl.addEventListener('click', e => {
-            const rect = childrenEl.getBoundingClientRect();
-            if (e.clientX - rect.left > 20) return;
-            e.stopPropagation();
-            toggleCollapse(childrenEl, hint, count, reply.id);
-          });
-          hint.addEventListener('click', () => toggleCollapse(childrenEl, hint, count, reply.id));
 
           wrapper.appendChild(childrenEl);
           wrapper.appendChild(hint);
@@ -758,44 +834,71 @@
       container.appendChild(fragment);
     }
 
-    // ── 未读标记 ──
-    function handleReadStatus(topicId, replies) {
-      const key    = `${CONFIG.threadTree.readKeyPrefix}${topicId}`;
-      const stored = localStorage.getItem(key);
-      let maxFloor = 0;
-      for (const r of replies) if (r.floorNum > maxFloor) maxFloor = r.floorNum;
+    // ── 未读标记：仅在所有分页成功后推进阅读进度 ──
+    function createReadState(topicId) {
+      const key = `${CONFIG.threadTree.readKeyPrefix}${topicId}`;
+      try {
+        const stored = localStorage.getItem(key);
+        return { key, firstVisit: stored === null, lastReadFloor: Number.parseInt(stored || '0', 10) || 0 };
+      } catch (err) {
+        log('Read state error:', err);
+        return { key, firstVisit: true, lastReadFloor: 0, disabled: true };
+      }
+    }
 
-      if (stored === null) { localStorage.setItem(key, String(maxFloor)); return 0; }
-
-      const lastReadFloor = parseInt(stored, 10) || 0;
+    function markUnread(state, replies) {
+      if (state.firstVisit) return 0;
       let newCount = 0;
       for (const r of replies) {
-        if (r.floorNum > lastReadFloor) {
-          newCount++;
-          r.element.classList.add('reply-new');
-          const strongEl = r.element.querySelector('strong');
-          if (strongEl && !r.element.querySelector('.new-badge')) {
-            const badge = document.createElement('span');
-            badge.className = 'new-badge'; badge.textContent = 'NEW'; badge.title = '未读新回复';
-            strongEl.insertAdjacentElement('afterend', badge);
-          }
+        if (r.floorNum <= state.lastReadFloor) continue;
+        newCount++;
+        r.element.classList.add('reply-new');
+        const strongEl = r.element.querySelector('strong');
+        if (strongEl && !r.element.querySelector('.new-badge')) {
+          const badge = document.createElement('span');
+          badge.className = 'new-badge'; badge.textContent = 'NEW'; badge.title = '未读新回复';
+          strongEl.insertAdjacentElement('afterend', badge);
         }
       }
-      localStorage.setItem(key, String(maxFloor));
       return newCount;
+    }
+
+    function commitReadState(state, replies) {
+      if (state.disabled) return;
+      let maxFloor = 0;
+      for (const r of replies) if (r.floorNum > maxFloor) maxFloor = r.floorNum;
+      try { localStorage.setItem(state.key, String(maxFloor)); }
+      catch (err) { log('Read state error:', err); }
+    }
+
+    function updateNewCountBar(replyBox, newCount) {
+      let bar = document.getElementById('v2ex-new-count-bar');
+      if (newCount <= 0) {
+        bar?.remove();
+        return;
+      }
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'v2ex-new-count-bar';
+        replyBox.parentNode.insertBefore(bar, replyBox);
+      }
+      bar.innerHTML = `<span class="ncb-dot"></span><span>有 <strong>${newCount}</strong> 条新回复</span><span class="ncb-hint">j / k 键跳转</span>`;
     }
 
     // ── 悬停引用预览（在 B64 完成后运行，延迟 150ms）──
     function initHoverPreview(allReplies, { floorMap, nameMap }) {
       // 非全局：用于 acceptNode 内的测试（无 lastIndex 副作用）
-      const REF_TEST_RE = /@[a-zA-Z0-9]+|#\d+/;
+      const REF_TEST_RE = /@[a-zA-Z0-9_-]+|#\d+/;
       // 全局：用于 exec 循环
-      const REF_EXEC_RE = /(@[a-zA-Z0-9]+|#\d+)/g;
+      const REF_EXEC_RE = /(@[a-zA-Z0-9_-]+|#\d+)/g;
 
       let card      = null;
       let hideTimer = null;
 
       function getCard() {
+        if (!card?.isConnected) {
+          card = document.getElementById('v2ex-ref-preview');
+        }
         if (!card) {
           card = document.createElement('div');
           card.id = 'v2ex-ref-preview';
@@ -807,18 +910,34 @@
       function showCard(refReply, anchorEl) {
         clearTimeout(hideTimer);
         const c = getCard();
-        const contentHtml = refReply.element.querySelector('.reply_content')?.innerHTML || refReply.content;
-        c.innerHTML = `
-          <div class="rp-header">
-            <img class="rp-avatar" src="${refReply.memberAvatar}" />
-            <span class="rp-name">${refReply.memberName}</span>
-            <span class="rp-floor">#${refReply.floor}</span>
-          </div>
-          <div class="rp-content">${contentHtml}</div>
-        `;
+        const header = document.createElement('div');
+        header.className = 'rp-header';
+        if (refReply.memberAvatar) {
+          const avatar = document.createElement('img');
+          avatar.className = 'rp-avatar';
+          avatar.src = refReply.memberAvatar;
+          avatar.alt = '';
+          header.appendChild(avatar);
+        }
+        const name = document.createElement('span');
+        name.className = 'rp-name';
+        name.textContent = refReply.memberName;
+        const floor = document.createElement('span');
+        floor.className = 'rp-floor';
+        floor.textContent = refReply.floor.startsWith('#') ? refReply.floor : `#${refReply.floor}`;
+        header.append(name, floor);
+
+        const content = document.createElement('div');
+        content.className = 'rp-content';
+        const source = refReply.element.querySelector('.reply_content');
+        if (source) content.append(...source.cloneNode(true).childNodes);
+        else content.textContent = refReply.content;
+        c.replaceChildren(header, content);
+
         const rect  = anchorEl.getBoundingClientRect();
-        const cardW = 360;
-        const cardH = 160;
+        const cardRect = c.getBoundingClientRect();
+        const cardW = Math.min(360, cardRect.width || 360);
+        const cardH = cardRect.height || 160;
         const left  = Math.max(4, Math.min(rect.left, window.innerWidth - cardW - 10));
         const top   = (window.innerHeight - rect.bottom > cardH + 10)
           ? rect.bottom + 6
@@ -832,9 +951,39 @@
         hideTimer = setTimeout(() => card?.classList.remove('visible'), 120);
       }
 
+      function findPreviousReplyByName(name, replyIndex) {
+        const candidates = nameMap.get(name.toLowerCase());
+        return findPreviousCandidate(candidates, replyIndex);
+      }
+
+      function bindPreview(anchor, refReply) {
+        anchor.classList.add('v2-ref-link');
+        anchor._v2RefReply = refReply;
+        if (document._v2RefPreviewBound) return;
+        document._v2RefPreviewBound = true;
+        document.addEventListener('mouseover', e => {
+          const target = e.target.closest?.('.v2-ref-link');
+          if (!target?._v2RefReply || (e.relatedTarget instanceof Node && target.contains(e.relatedTarget))) return;
+          showCard(target._v2RefReply, target);
+        });
+        document.addEventListener('mouseout', e => {
+          const target = e.target.closest?.('.v2-ref-link');
+          if (!target?._v2RefReply || (e.relatedTarget instanceof Node && target.contains(e.relatedTarget))) return;
+          hideCard();
+        });
+      }
+
       for (const reply of allReplies) {
         const contentEl = reply.element.querySelector('.reply_content');
         if (!contentEl) continue;
+
+        // V2EX 会把 @ 与用户名拆成相邻文本和链接，直接绑定现有会员链接。
+        contentEl.querySelectorAll('a[href^="/member/"]:not(.v2-ref-link)').forEach(anchor => {
+          const previous = anchor.previousSibling;
+          if (previous?.nodeType !== Node.TEXT_NODE || !/@\s*$/.test(previous.nodeValue || '')) return;
+          const refReply = findPreviousReplyByName(anchor.textContent?.trim() || '', reply.index);
+          if (refReply) bindPreview(anchor, refReply);
+        });
 
         const walker = document.createTreeWalker(contentEl, NodeFilter.SHOW_TEXT, {
           acceptNode(node) {
@@ -860,13 +1009,7 @@
             let refReply = null;
 
             if (token.startsWith('@')) {
-              const name  = token.slice(1).toLowerCase();
-              const cands = nameMap.get(name);
-              if (cands?.length) {
-                for (let i = cands.length - 1; i >= 0; i--) {
-                  if (cands[i].index < reply.index) { refReply = cands[i]; break; }
-                }
-              }
+              refReply = findPreviousReplyByName(token.slice(1), reply.index);
             } else if (token.startsWith('#')) {
               const floor = parseInt(token.slice(1), 10);
               const found = floorMap.get(floor) ?? null;
@@ -877,8 +1020,7 @@
             if (refReply) {
               const span = document.createElement('span');
               span.className = 'v2-ref-link'; span.textContent = token;
-              span.addEventListener('mouseenter', () => showCard(refReply, span));
-              span.addEventListener('mouseleave', hideCard);
+              bindPreview(span, refReply);
               frag.appendChild(span);
               changed = true;
             } else {
@@ -895,6 +1037,81 @@
       }
     }
 
+    function getTotalPages() {
+      const candidates = [1];
+      const max = Number.parseInt(document.querySelector('.page_input')?.getAttribute('max') || '', 10);
+      if (Number.isSafeInteger(max)) candidates.push(max);
+      document.querySelectorAll('a.page_normal, .page_current').forEach(el => {
+        const fromText = Number.parseInt(el.textContent || '', 10);
+        if (Number.isSafeInteger(fromText)) candidates.push(fromText);
+        try {
+          const fromUrl = Number.parseInt(new URL(el.href, location.href).searchParams.get('p') || '', 10);
+          if (Number.isSafeInteger(fromUrl)) candidates.push(fromUrl);
+        } catch (_) {}
+      });
+      return Math.max(...candidates);
+    }
+
+    function pageUrl(page) {
+      const url = new URL(location.href);
+      url.searchParams.set('p', String(page));
+      url.hash = '';
+      return url.href;
+    }
+
+    async function fetchReplyPage(page) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CONFIG.threadTree.pageFetchTimeoutMs);
+      try {
+        const res = await fetch(pageUrl(page), {
+          credentials: 'include',
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+        const replies = extractRepliesFromDoc(doc);
+        if (!replies.length) throw new Error('页面中没有回复');
+        return replies;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function fetchPages(pages, onProgress) {
+      if (!pages.length) return [];
+      const results = new Array(pages.length);
+      let cursor = 0;
+      let completed = 0;
+      const worker = async () => {
+        while (cursor < pages.length) {
+          const index = cursor++;
+          const page = pages[index];
+          try {
+            results[index] = { page, replies: await fetchReplyPage(page) };
+          } catch (error) {
+            results[index] = { page, replies: null, error };
+          } finally {
+            completed++;
+            onProgress?.(completed, pages.length);
+          }
+        }
+      };
+      const workerCount = Math.min(CONFIG.threadTree.pageFetchConcurrency, pages.length);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+      return results;
+    }
+
+    function normalizeReplies(replies) {
+      const byId = new Map();
+      for (const reply of replies) {
+        if (!byId.has(reply.id)) byId.set(reply.id, reply);
+      }
+      const normalized = [...byId.values()].sort((a, b) => a.floorNum - b.floorNum);
+      normalized.forEach((reply, index) => { reply.index = index; });
+      return normalized;
+    }
+
     // ── 主流程 ──
     async function init() {
       if (!isTopicPage()) return;
@@ -905,53 +1122,45 @@
       if (!replyBox) return;
 
       const loadingBar = document.createElement('div');
-      loadingBar.id = 'v2ex-loading-bar'; loadingBar.innerText = '加载中...';
+      loadingBar.id = 'v2ex-loading-bar'; loadingBar.textContent = '加载中…';
       replyBox.parentNode.insertBefore(loadingBar, replyBox);
 
-      let totalPages = 1;
-      const pageInput = document.querySelector('.page_input');
-      if (pageInput) {
-        totalPages = parseInt(pageInput.max, 10) || 1;
-      } else {
-        const pageLinks = document.querySelectorAll('a.page_normal');
-        if (pageLinks.length > 0) totalPages = parseInt(pageLinks[pageLinks.length - 1].innerText, 10) || 1;
-      }
-
+      const totalPages = getTotalPages();
       let allReplies = extractRepliesFromDoc(document);
-      const currentP = parseInt(new URLSearchParams(location.search).get('p') || '1', 10);
-      const failedPages = [];
+      const requestedPage = Number.parseInt(new URLSearchParams(location.search).get('p') || '1', 10);
+      const currentPage = Number.isSafeInteger(requestedPage) && requestedPage >= 1 && requestedPage <= totalPages
+        ? requestedPage
+        : 1;
+      const pages = Array.from({ length: totalPages }, (_, i) => i + 1).filter(page => page !== currentPage);
+      const pageResults = await fetchPages(pages, (completed, total) => {
+        loadingBar.textContent = `加载回复页 ${completed} / ${total}…`;
+      });
 
-      if (totalPages > 1) {
-        const fetches = Array.from({ length: totalPages }, (_, i) => i + 1)
-          .filter(p => p !== currentP)
-          .map(p =>
-            fetch(`${location.pathname}?p=${p}`)
-              .then(r => r.text())
-              .then(html => extractRepliesFromDoc(new DOMParser().parseFromString(html, 'text/html')))
-              .catch(() => { failedPages.push(p); return []; })
-          );
-        const results = await Promise.all(fetches);
-        results.forEach(list => allReplies.push(...list));
+      const failedPages = pageResults.filter(result => !result.replies).map(result => result.page);
+      for (const result of pageResults) {
+        if (result.replies) allReplies.push(...result.replies);
+        else log(`Reply page ${result.page} failed:`, result.error);
       }
 
-      allReplies.sort((a, b) => a.floorNum - b.floorNum);
-      allReplies.forEach((r, i) => { r.index = i; });
-      document.querySelectorAll('.page_input, .page_current, .page_normal').forEach(el => el.closest('div')?.remove());
+      allReplies = normalizeReplies(allReplies);
+      document.querySelectorAll('.page_input, .page_current, .page_normal').forEach(el => el.remove());
 
       // let 以便 doRetry 内可重新赋值
       let maps = buildLookupMaps(allReplies);
+      const readState = createReadState(topicId);
+      let newCount = markUnread(readState, allReplies);
       renderTree(allReplies, maps, replyBox, topicId);
 
-      const newCount = handleReadStatus(topicId, allReplies);
       loadingBar.remove();
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
+      updateNewCountBar(replyBox, newCount);
+      if (!failedPages.length) commitReadState(readState, allReplies);
 
-      if (newCount > 0) {
-        const bar = document.createElement('div');
-        bar.id = 'v2ex-new-count-bar';
-        bar.innerHTML = `<span class="ncb-dot"></span><span>有 <strong>${newCount}</strong> 条新回复</span><span class="ncb-hint">j / k 键跳转</span>`;
-        replyBox.parentNode.insertBefore(bar, replyBox);
-      }
+      let hoverTimer = null;
+      const scheduleHoverPreview = () => {
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => initHoverPreview(allReplies, maps), 50);
+      };
 
       // ── 失败页重试（支持递归多次重试）──
       if (failedPages.length > 0) {
@@ -965,41 +1174,45 @@
             const btn = banner.querySelector('button');
             btn.textContent = '重试中…'; btn.disabled = true;
 
-            const results = await Promise.all(
-              pagesToRetry.map(p =>
-                fetch(`${location.pathname}?p=${p}`)
-                  .then(r => r.text())
-                  .then(html => ({ p, replies: extractRepliesFromDoc(new DOMParser().parseFromString(html, 'text/html')) }))
-                  .catch(() => ({ p, replies: null }))
-              )
-            );
-
-            const stillFailed = results.filter(r => !r.replies).map(r => r.p);
-            const newReplies   = results.filter(r =>  r.replies).flatMap(r => r.replies);
+            const results = await fetchPages(pagesToRetry, (completed, total) => {
+              btn.textContent = `重试中 ${completed}/${total}…`;
+            });
+            const stillFailed = results.filter(result => !result.replies).map(result => result.page);
+            const newReplies = results.filter(result => result.replies).flatMap(result => result.replies);
+            results.filter(result => !result.replies).forEach(result => {
+              log(`Reply page ${result.page} retry failed:`, result.error);
+            });
 
             if (newReplies.length > 0) {
-              allReplies = [...allReplies, ...newReplies].sort((a, b) => a.floorNum - b.floorNum);
-              allReplies.forEach((r, i) => { r.index = i; });
+              allReplies = normalizeReplies([...allReplies, ...newReplies]);
               maps = buildLookupMaps(allReplies);
+              newCount = markUnread(readState, allReplies);
               renderTree(allReplies, maps, replyBox, topicId);
-              setTimeout(() => initHoverPreview(allReplies, maps), 150);
+              updateNewCountBar(replyBox, newCount);
+              scheduleHoverPreview();
             }
 
             if (stillFailed.length > 0) {
               attachRetry(stillFailed); // 仍有失败页 → 重新挂载按钮
             } else {
               banner.remove();
+              commitReadState(readState, allReplies);
             }
           });
         }
         attachRetry([...failedPages]);
       }
 
-      // 悬停预览在 B64 完成后运行（B64 延迟 60ms，此处给 150ms 裕量）
-      setTimeout(() => initHoverPreview(allReplies, maps), 150);
+      // 等待 B64 的 MutationObserver 完成本轮 DOM 处理。
+      scheduleHoverPreview();
     }
 
-    function boot() { init().catch(err => log('ThreadTree error:', err)); }
+    function boot() {
+      init().catch(err => {
+        document.getElementById('v2ex-loading-bar')?.remove();
+        log('ThreadTree error:', err);
+      });
+    }
     return { boot };
   })();
 
@@ -1010,11 +1223,13 @@
 
     // ── Lightbox ──
     function openLightbox(src) {
+      if (!src) return;
       let lb = document.getElementById('v2ex-lightbox');
       if (!lb) {
         lb = document.createElement('div');
         lb.id = 'v2ex-lightbox';
         const img = document.createElement('img');
+        img.alt = '';
         lb.appendChild(img);
         document.body.appendChild(lb);
         lb.addEventListener('click', () => lb.classList.remove('active'));
@@ -1032,22 +1247,23 @@
         try {
           let likes = 0;
           for (const span of cell.querySelectorAll('.small.fade')) {
-            const text = span.innerText || '';
+            const text = span.textContent || '';
             const m1 = text.match(/(?:♥|❤️)\s*(\d+)/);
             if (m1) { likes = parseInt(m1[1], 10); break; }
             if (span.querySelector('img[alt="❤️"]') && text.trim().length > 0) {
-              likes = parseInt(text.trim(), 10); break;
+              likes = parseInt(text.trim(), 10) || 0; break;
             }
           }
           if (likes > 0) {
+            const content = cell.querySelector('.reply_content');
             comments.push({
               id: cell.id, likes,
               avatar:      cell.querySelector('img.avatar')?.src || '',
-              username:    cell.querySelector('strong > a')?.innerText || 'Unknown',
+              username:    cell.querySelector('strong > a')?.textContent?.trim() || 'Unknown',
               userUrl:     cell.querySelector('strong > a')?.href || '#',
-              time:        cell.querySelector('.ago')?.innerText || '',
-              contentHtml: cell.querySelector('.reply_content')?.innerHTML || '',
-              floor:       cell.querySelector('.no')?.innerText || '#',
+              time:        cell.querySelector('.ago')?.textContent?.trim() || '',
+              contentNode: content?.cloneNode(true) || null,
+              floor:       cell.querySelector('.no')?.textContent?.trim() || '#',
             });
           }
         } catch (_) {}
@@ -1056,7 +1272,9 @@
     }
 
     function buildUI(comments) {
-      document.getElementById('hot-overlay')?.remove();
+      const existing = document.getElementById('hot-overlay');
+      existing?._cleanup?.();
+      existing?.remove();
       const overlay   = document.createElement('div');
       overlay.id      = 'hot-overlay';
       const container = document.createElement('div');
@@ -1076,9 +1294,11 @@
           const header = document.createElement('div');
           header.className = 'card-header-row';
 
-          const avatar = document.createElement('img');
-          avatar.className = 'user-avatar'; avatar.src = c.avatar;
-          header.appendChild(avatar);
+          if (c.avatar) {
+            const avatar = document.createElement('img');
+            avatar.className = 'user-avatar'; avatar.src = c.avatar; avatar.alt = '';
+            header.appendChild(avatar);
+          }
 
           const user = document.createElement('a');
           user.className = 'user-name'; user.href = c.userUrl;
@@ -1107,7 +1327,7 @@
 
           const content = document.createElement('div');
           content.className = 'card-content';
-          content.innerHTML = c.contentHtml;
+          if (c.contentNode) content.append(...c.contentNode.childNodes);
 
           // ── Lightbox：为卡片内图片挂载点击处理 ──
           content.querySelectorAll('img').forEach(img => {
@@ -1126,7 +1346,10 @@
       overlay.appendChild(container);
       document.body.appendChild(overlay);
       overlay.addEventListener('click', e => { if (e.target === overlay) closeOverlay(overlay); });
-      const onKey = e => { if (e.key === 'Escape') closeOverlay(overlay); };
+      const onKey = e => {
+        if (e.key !== 'Escape' || document.getElementById('v2ex-lightbox')?.classList.contains('active')) return;
+        closeOverlay(overlay);
+      };
       document.addEventListener('keydown', onKey);
       overlay._cleanup = () => document.removeEventListener('keydown', onKey);
       return overlay;
@@ -1146,7 +1369,7 @@
         const target = document.querySelector('#Main .header h1') || document.querySelector('#Main .box .header');
         if (target && !document.getElementById('v2ex-hot-btn')) {
           const btn = document.createElement('span');
-          btn.id = 'v2ex-hot-btn'; btn.innerText = '高赞';
+          btn.id = 'v2ex-hot-btn'; btn.textContent = '高赞';
           btn.addEventListener('click', e => {
             e.preventDefault(); e.stopPropagation();
             const overlay = buildUI(extractComments());
@@ -1161,11 +1384,11 @@
   })();
 
   // =========================
-  // 7) 功能E：j/k 键盘导航（MutationObserver 版，零延迟）
+  // 7) 功能E：j/k 键盘导航（按需刷新，无常驻扫描）
   // =========================
   const NavKeys = (() => {
     const SCROLL_OFFSET_RATIO = CONFIG.nav.scrollOffsetRatio;
-    let newReplies = [], curIndex = -1, hudTimer = null;
+    let newReplies = [], curIndex = -1, hudTimer = null, activeReply = null;
 
     function getHud() {
       let hud = document.getElementById('v2ex-nav-hud');
@@ -1189,16 +1412,21 @@
       window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
     }
     function setActive(el) {
-      document.querySelectorAll('.reply-nav-active').forEach(e => e.classList.remove('reply-nav-active'));
+      document.querySelector('.reply-nav-active')?.classList.remove('reply-nav-active');
+      activeReply = el || null;
       if (el) (el.closest('.reply-wrapper') || el).classList.add('reply-nav-active');
     }
-    function refreshList() { newReplies = Array.from(document.querySelectorAll('.reply-new')); }
+    function refreshList() {
+      newReplies = Array.from(document.querySelectorAll('.reply-new'));
+      const activeIndex = activeReply ? newReplies.indexOf(activeReply) : -1;
+      curIndex = activeIndex >= 0 ? activeIndex : -1;
+    }
     function navigate(direction) {
       refreshList();
       if (!newReplies.length) return;
       curIndex = direction === 'next'
         ? Math.min(curIndex + 1, newReplies.length - 1)
-        : Math.max(curIndex - 1, 0);
+        : (curIndex < 0 ? newReplies.length - 1 : Math.max(curIndex - 1, 0));
       const target = newReplies[curIndex];
       setActive(target); scrollToReply(target); showHud(curIndex, newReplies.length, direction);
     }
@@ -1210,26 +1438,10 @@
       if (e.key === 'j') { e.preventDefault(); navigate('next'); }
       else if (e.key === 'k') { e.preventDefault(); navigate('prev'); }
     }
-    function waitAndBoot() {
-      // MutationObserver 替代 setInterval 轮询，DOM 变化时立即响应
-      const observer = new MutationObserver(() => {
-        if (document.querySelectorAll('.reply-new').length > 0) {
-          observer.disconnect();
-          refreshList();
-          document.addEventListener('keydown', onKeyDown);
-          log(`NavKeys ready: ${newReplies.length} new replies`);
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-      // 保底：ThreadTree 可能在 NavKeys.boot() 之前已完成渲染
-      if (document.querySelectorAll('.reply-new').length > 0) {
-        observer.disconnect();
-        refreshList();
-        document.addEventListener('keydown', onKeyDown);
-        log(`NavKeys ready (instant): ${newReplies.length} new replies`);
-      }
+    function boot() {
+      if (!isTopicPage()) return;
+      document.addEventListener('keydown', onKeyDown);
     }
-    function boot() { if (!isTopicPage()) return; waitAndBoot(); }
     return { boot };
   })();
 
@@ -1237,27 +1449,52 @@
   // 8) 功能F：Imgur 图片代理
   // =========================
   const ImgurProxy = (() => {
+    function parseImgurUrl(value) {
+      if (!value) return null;
+      try {
+        const url = new URL(value.startsWith('//') ? `https:${value}` : value, location.href);
+        const host = url.hostname.toLowerCase();
+        return host === 'imgur.com' || host.endsWith('.imgur.com') ? url : null;
+      } catch (_) { return null; }
+    }
+
+    function proxyUrl(url) {
+      return `https://external-content.duckduckgo.com/iu/?u=${encodeURIComponent(url.href)}&f=1&nofb=1`;
+    }
+
+    function isDirectImage(url) {
+      return url.hostname.toLowerCase() === 'i.imgur.com' || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(url.pathname);
+    }
+
     function processImage(img) {
+      if (img.dataset.proxied === '1') return;
       const src = img.getAttribute('src');
-      if (!src || !src.includes('imgur.com') || src.includes('external-content.duckduckgo.com')) return;
-      let fullUrl = src.startsWith('//') ? 'https:' + src : src.startsWith('http') ? src : 'https://' + src;
-      img.setAttribute('src', `https://external-content.duckduckgo.com/iu/?u=${encodeURIComponent(fullUrl)}&f=1&nofb=1`);
+      const imgurUrl = parseImgurUrl(src);
+      if (!imgurUrl) return;
       img.dataset.proxied = '1';
+      img.setAttribute('src', proxyUrl(imgurUrl));
       const parent = img.parentElement;
       if (parent?.tagName?.toLowerCase() === 'a') {
-        const href = parent.getAttribute('href');
-        if (href?.includes('imgur.com') && !href.includes('duckduckgo.com')) {
-          const fullHref = href.startsWith('//') ? 'https:' + href : href;
-          parent.setAttribute('href', `https://external-content.duckduckgo.com/iu/?u=${encodeURIComponent(fullHref)}&f=1&nofb=1`);
-        }
+        const href = parseImgurUrl(parent.getAttribute('href'));
+        if (href && isDirectImage(href)) parent.setAttribute('href', proxyUrl(href));
       }
     }
+
+    function processNode(node) {
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.matches('img')) processImage(node);
+      node.querySelectorAll('img').forEach(processImage);
+    }
+
     function scanAll() { document.querySelectorAll('img[src*="imgur.com"]').forEach(processImage); }
     function boot() {
       scanAll();
       new MutationObserver(mutations => {
-        if (mutations.some(m => m.addedNodes?.length > 0)) scanAll();
-      }).observe(document.body, { childList: true, subtree: true });
+        for (const mutation of mutations) {
+          if (mutation.type === 'attributes') processImage(mutation.target);
+          else for (const node of mutation.addedNodes) processNode(node);
+        }
+      }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
     }
     return { boot };
   })();
