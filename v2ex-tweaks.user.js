@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.4.0
-// @description  V2EX 日常增强：回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.0
+// @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -11,6 +11,9 @@
 // @grant        GM_setClipboard
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_registerMenuCommand
 // @grant        GM_notification
 // @grant        GM_xmlhttpRequest
 // @connect      v2ex.com
@@ -34,8 +37,22 @@
       requestTimeoutMs: 12000,
       verifyRetries: 3,
       verifyIntervalMs: 900,
-      storeKey: 'v2ex_daily_check_ymd_v3',
+      // 网络类错误的自动补签：失败后延迟重试，避免一次抖动就漏签
+      networkRetries: 3,
+      networkRetryDelayMs: 5 * 60 * 1000,
+      // 页面长期打开时的兜底轮询：仅在"今日未签到"时才真正发请求
+      pollIntervalMs: 15 * 60 * 1000,
+      // V2EX 的每日奖励按服务器所在时区（UTC+8）跨天，不能用 UTC 日期判断
+      timeZone: 'Asia/Shanghai',
+      storeKey: 'v2ex_daily_check_ymd_v4',
       notify: true,
+    },
+    tags: {
+      storeKey: 'v2ex_user_tags_v1',
+      maxTagLength: 24,
+      // 墓碑保留时长：超过该时长的删除记录在合并时被清理
+      tombstoneTtlMs: 180 * 24 * 60 * 60 * 1000,
+      exportVersion: 1,
     },
     b64: {
       minLen: 8,
@@ -69,12 +86,70 @@
     try { GM_notification({ title, text, timeout }); } catch (_) {}
   }
 
-  function ymdUtc(time = Date.now()) {
-    return new Date(time).toISOString().slice(0, 10);
+  // V2EX 服务端按 UTC+8 跨天，签到判重必须用同一时区，否则 16:00Z–24:00Z 这段
+  // 时间里（北京时间次日 0–8 点）会误判为"今天已签到"而漏签。
+  const YMD_FORMATTER = (() => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: CONFIG.daily.timeZone,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+      });
+    } catch (_) { return null; }
+  })();
+
+  function ymd(time = Date.now()) {
+    if (YMD_FORMATTER) {
+      // en-CA 固定输出 YYYY-MM-DD
+      return YMD_FORMATTER.format(time);
+    }
+    return new Date(time + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
   }
 
   function isTopicPage() {
     return /^\/t\/\d+(?:\/|$)/.test(location.pathname);
+  }
+
+  function debounce(fn, wait) {
+    let timer = 0;
+    return (...args) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fn(...args), wait);
+    };
+  }
+
+  // GM_* 在部分管理器（或 @grant 缺失时）不存在，统一降级到 localStorage
+  const GM = {
+    get(key, fallback) {
+      try { return typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : JSON.parse(localStorage.getItem(key) ?? 'null') ?? fallback; }
+      catch (_) { return fallback; }
+    },
+    set(key, value) {
+      try {
+        if (typeof GM_setValue === 'function') GM_setValue(key, value);
+        else localStorage.setItem(key, JSON.stringify(value));
+        return true;
+      } catch (err) { log('Storage write failed:', err); return false; }
+    },
+    onChange(key, handler) {
+      try {
+        if (typeof GM_addValueChangeListener === 'function') {
+          GM_addValueChangeListener(key, (_k, _old, next, remote) => { if (remote) handler(next); });
+          return;
+        }
+      } catch (_) {}
+      window.addEventListener('storage', e => { if (e.key === key) handler(undefined); });
+    },
+    menu(label, handler) {
+      try { if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand(label, handler); } catch (_) {}
+    },
+  };
+
+  // 把 hex 颜色转成 rgba，用于标签胶囊的底色/边框（避免依赖 color-mix 的浏览器支持）
+  function hexToRgba(hex, alpha) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return `rgba(138, 148, 166, ${alpha})`;
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
   }
 
   // Shannon 熵：衡量字符串的信息多样性
@@ -95,6 +170,202 @@
   // =========================
   // 2) 样式（合并注入）
   // =========================
+
+  // ── 全站样式：用户标签胶囊 / 编辑气泡 / 管理面板 / Toast ──
+  GM_addStyle(`
+    :root {
+      --v2t-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --v2t-surface: #fff;
+      --v2t-surface-2: #f7f8fa;
+      --v2t-text: #2b2f38;
+      --v2t-text-dim: #8a94a6;
+      --v2t-border: #e6e9f0;
+      --v2t-shadow: 0 12px 40px rgba(18, 24, 40, 0.16);
+      --v2t-accent: #4a7af0;
+    }
+    #Wrapper.Night {
+      --v2t-surface: #23252b;
+      --v2t-surface-2: #2b2e35;
+      --v2t-text: #dfe2e8;
+      --v2t-text-dim: #8b93a3;
+      --v2t-border: #3a3d45;
+      --v2t-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    }
+
+    /* ── 胶囊 ── */
+    .v2t-slot { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; margin-left: 6px; }
+    .v2t-chip {
+      display: inline-flex; align-items: center; max-width: 160px;
+      padding: 0 6px; height: 16px; line-height: 16px;
+      font-size: 11px; font-weight: 600; font-family: var(--v2t-font);
+      letter-spacing: 0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      border-radius: 4px; cursor: pointer; user-select: none;
+      background: var(--v2t-chip-bg); color: var(--v2t-chip-fg);
+      border: 1px solid var(--v2t-chip-bd);
+      transition: filter 0.12s, transform 0.12s;
+    }
+    .v2t-chip:hover { filter: brightness(0.94); }
+    .v2t-chip:active { transform: scale(0.96); }
+    #Wrapper.Night .v2t-chip {
+      background: var(--v2t-chip-bg-n); color: var(--v2t-chip-fg-n); border-color: var(--v2t-chip-bd-n);
+    }
+    /* 未打标签时的 + 按钮平时完全隐藏（且不可点击），仅在该行悬停/聚焦时浮现 */
+    .v2t-add {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 15px; height: 15px; border-radius: 4px;
+      font-size: 12px; line-height: 1; font-family: var(--v2t-font);
+      color: var(--v2t-text-dim); border: 1px dashed var(--v2t-border);
+      cursor: pointer; user-select: none; opacity: 0; pointer-events: none;
+      transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .v2t-add:focus-visible,
+    .cell:hover .v2t-add, .hot-card:hover .v2t-add, .header:hover .v2t-add { opacity: 1; pointer-events: auto; }
+    .v2t-add:hover { color: var(--v2t-accent); border-color: var(--v2t-accent); }
+
+    /* ── 编辑气泡 ── */
+    #v2t-editor {
+      position: fixed; z-index: 100001; width: 268px;
+      background: var(--v2t-surface); color: var(--v2t-text);
+      border: 1px solid var(--v2t-border); border-radius: 10px;
+      box-shadow: var(--v2t-shadow); padding: 12px;
+      font-family: var(--v2t-font); font-size: 13px;
+      opacity: 0; pointer-events: none; transform: translateY(6px) scale(0.98);
+      transition: opacity 0.14s ease, transform 0.14s ease;
+    }
+    #v2t-editor.visible { opacity: 1; pointer-events: auto; transform: none; }
+    #v2t-editor .v2t-ed-head {
+      display: flex; align-items: center; gap: 6px;
+      margin-bottom: 10px; font-size: 12px; color: var(--v2t-text-dim);
+    }
+    #v2t-editor .v2t-ed-head img { width: 18px; height: 18px; border-radius: 4px; object-fit: cover; flex: none; }
+    #v2t-editor .v2t-ed-head b { color: var(--v2t-text); font-size: 13px; font-weight: 600; }
+    #v2t-editor input[type="text"] {
+      width: 100%; box-sizing: border-box; height: 30px; padding: 0 9px;
+      border: 1px solid var(--v2t-border); border-radius: 6px;
+      background: var(--v2t-surface-2); color: var(--v2t-text);
+      font-size: 13px; font-family: inherit; outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    #v2t-editor input[type="text"]:focus {
+      border-color: var(--v2t-accent);
+      box-shadow: 0 0 0 3px rgba(74, 122, 240, 0.14);
+    }
+    #v2t-editor .v2t-swatches { display: flex; gap: 6px; margin: 10px 0 2px; }
+    #v2t-editor .v2t-swatch {
+      width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+      border: 2px solid transparent; background-clip: padding-box;
+      transition: transform 0.12s;
+    }
+    #v2t-editor .v2t-swatch:hover { transform: scale(1.12); }
+    #v2t-editor .v2t-swatch.selected { box-shadow: 0 0 0 2px var(--v2t-surface), 0 0 0 4px currentColor; }
+    #v2t-editor .v2t-recent { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    #v2t-editor .v2t-recent-item {
+      font-size: 11px; padding: 1px 7px; border-radius: 4px; cursor: pointer;
+      background: var(--v2t-surface-2); color: var(--v2t-text-dim);
+      border: 1px solid var(--v2t-border); max-width: 110px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #v2t-editor .v2t-recent-item:hover { color: var(--v2t-accent); border-color: var(--v2t-accent); }
+    #v2t-editor .v2t-ed-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+    #v2t-editor .v2t-ed-actions .v2t-spacer { margin-left: auto; }
+
+    .v2t-btn {
+      height: 27px; padding: 0 12px; border-radius: 6px;
+      border: 1px solid var(--v2t-border); background: var(--v2t-surface);
+      color: var(--v2t-text); font-size: 12px; font-family: var(--v2t-font);
+      cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .v2t-btn:hover { background: var(--v2t-surface-2); }
+    .v2t-btn:disabled { opacity: 0.5; cursor: default; }
+    .v2t-btn.primary { background: var(--v2t-accent); border-color: var(--v2t-accent); color: #fff; }
+    .v2t-btn.primary:hover { filter: brightness(1.06); background: var(--v2t-accent); }
+    .v2t-btn.danger { color: #e0483a; }
+    .v2t-btn.danger:hover { background: rgba(224, 72, 58, 0.08); border-color: rgba(224, 72, 58, 0.4); }
+
+    /* ── 管理面板 ── */
+    #v2t-manager {
+      position: fixed; inset: 0; z-index: 100000;
+      background: rgba(20, 24, 34, 0.42); backdrop-filter: blur(2px);
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; visibility: hidden; transition: opacity 0.18s, visibility 0.18s;
+      font-family: var(--v2t-font);
+    }
+    #v2t-manager.active { opacity: 1; visibility: visible; }
+    #v2t-manager .v2t-panel {
+      width: min(680px, 92vw); max-height: min(76vh, 720px);
+      display: flex; flex-direction: column;
+      background: var(--v2t-surface); color: var(--v2t-text);
+      border-radius: 14px; box-shadow: var(--v2t-shadow);
+      transform: translateY(10px) scale(0.99); transition: transform 0.18s ease;
+      overflow: hidden;
+    }
+    #v2t-manager.active .v2t-panel { transform: none; }
+    #v2t-manager .v2t-panel-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 16px; border-bottom: 1px solid var(--v2t-border);
+    }
+    #v2t-manager .v2t-title { font-size: 15px; font-weight: 600; }
+    #v2t-manager .v2t-count { font-size: 12px; color: var(--v2t-text-dim); }
+    #v2t-manager .v2t-search {
+      margin-left: auto; width: 170px; height: 28px; padding: 0 10px;
+      border: 1px solid var(--v2t-border); border-radius: 6px;
+      background: var(--v2t-surface-2); color: var(--v2t-text);
+      font-size: 12px; font-family: inherit; outline: none;
+    }
+    #v2t-manager .v2t-search:focus { border-color: var(--v2t-accent); }
+    #v2t-manager .v2t-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+    #v2t-manager .v2t-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 16px; border-bottom: 1px solid var(--v2t-border);
+    }
+    #v2t-manager .v2t-row:last-child { border-bottom: none; }
+    #v2t-manager .v2t-row:hover { background: var(--v2t-surface-2); }
+    #v2t-manager .v2t-row a.v2t-user { color: var(--v2t-text); font-size: 13px; text-decoration: none; font-weight: 500; }
+    #v2t-manager .v2t-row a.v2t-user:hover { color: var(--v2t-accent); }
+    #v2t-manager .v2t-row .v2t-time { margin-left: auto; font-size: 11px; color: var(--v2t-text-dim); font-variant-numeric: tabular-nums; }
+    #v2t-manager .v2t-row .v2t-row-act {
+      font-size: 11px; color: var(--v2t-text-dim); cursor: pointer; padding: 2px 4px; border-radius: 4px;
+    }
+    #v2t-manager .v2t-row .v2t-row-act:hover { color: var(--v2t-accent); background: var(--v2t-surface); }
+    #v2t-manager .v2t-row .v2t-row-act.danger:hover { color: #e0483a; }
+    #v2t-manager .v2t-empty { padding: 48px 16px; text-align: center; color: var(--v2t-text-dim); font-size: 13px; }
+    #v2t-manager .v2t-panel-foot {
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px 16px; border-top: 1px solid var(--v2t-border);
+      background: var(--v2t-surface-2);
+    }
+    #v2t-manager .v2t-panel-foot .v2t-spacer { margin-left: auto; }
+    #v2t-manager .v2t-merge {
+      padding: 12px 16px; border-top: 1px solid var(--v2t-border);
+      background: var(--v2t-surface-2); font-size: 12px; line-height: 1.7;
+    }
+    #v2t-manager .v2t-merge b { color: var(--v2t-accent); font-variant-numeric: tabular-nums; }
+    #v2t-manager .v2t-merge .v2t-merge-opts { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 10px; }
+    #v2t-manager .v2t-merge label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; color: var(--v2t-text); }
+
+    /* ── Toast ── */
+    #v2t-toast {
+      position: fixed; left: 50%; bottom: 32px; z-index: 100002;
+      transform: translate(-50%, 10px); opacity: 0; pointer-events: none;
+      padding: 8px 16px; border-radius: 20px;
+      background: rgba(22, 27, 46, 0.92); color: #eef2ff;
+      font-size: 12.5px; font-family: var(--v2t-font);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    #v2t-toast.visible { opacity: 1; transform: translate(-50%, 0); }
+
+    #v2t-entry {
+      display: inline-block; margin-left: 8px;
+      padding: 2px 10px; background-color: #f0f2f5; color: #ccc;
+      border-radius: 12px; font-size: 12px; cursor: pointer;
+      transition: all 0.2s ease; line-height: 1.5; border: 1px solid transparent;
+    }
+    #v2t-entry:hover { background-color: #e3e8f0; color: #555; border-color: #ccc; }
+    #Wrapper.Night #v2t-entry { background-color: #2b2e35; color: #6a707c; }
+    #Wrapper.Night #v2t-entry:hover { background-color: #343841; color: #b9bfca; border-color: #4a4e58; }
+  `);
+
   if (isTopicPage()) GM_addStyle(`
     /* ===== 楼层树 ===== */
     :root {
@@ -397,31 +668,79 @@
     .card-content pre { padding: 10px; background: #f8f8f8; border: 1px solid #eee; border-radius: 3px; font-size: 12px; margin: 8px 0; }
     #hot-overlay::-webkit-scrollbar { width: 4px; }
     #hot-overlay::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+
+    /* ===== 夜间模式适配 ===== */
+    #Wrapper.Night {
+      --line-color: #3a3d45;
+      --line-hover: #4c6bb5;
+      --bg-hover: #2a2d34;
+      --new-accent: #6f97ff;
+      --bg-new: #23304d;
+    }
+    #Wrapper.Night .reply-wrapper .cell { border-bottom-color: #303239 !important; }
+    #Wrapper.Night .reply-collapsed-hint { color: #7b818c; }
+    #Wrapper.Night #v2ex-new-count-bar {
+      background: linear-gradient(90deg, #262b3a 0%, #23252b 100%);
+      border-bottom-color: #343a4d; color: #93a6d8;
+    }
+    #Wrapper.Night #v2ex-loading-bar { background: #23252b; border-bottom-color: #303239; color: #7b818c; }
+    #Wrapper.Night #v2ex-retry-banner { background: #33291a; border-bottom-color: #5a4520; color: #e0b25e; }
+    #Wrapper.Night #v2ex-retry-banner button { background: #2a2d34; border-color: #5a4520; color: #e0b25e; }
+    #Wrapper.Night #v2ex-ref-preview { background: #23252b; border-color: #3a3d45; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+    #Wrapper.Night .rp-name { color: #dfe2e8; }
+    #Wrapper.Night .rp-content { color: #c2c7d0; }
+    #Wrapper.Night .v2-b64-plain { background: rgba(111,151,255,0.14); color: #9fb8ff; }
+    #Wrapper.Night .v2-b64-actions { background: #23252b; border-color: #3a4a6d; }
+    #Wrapper.Night .v2-b64-action { color: #8fabff; }
+    #Wrapper.Night .v2-b64-action:hover { background: #2c3346; }
+    #Wrapper.Night #v2ex-hot-btn { background-color: #2b2e35; color: #6a707c; }
+    #Wrapper.Night #v2ex-hot-btn:hover { background-color: #343841; color: #b9bfca; border-color: #4a4e58; }
+    #Wrapper.Night #hot-overlay { background: rgba(16,18,22,0.94); }
+    #Wrapper.Night .hot-container { background: #23252b; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    #Wrapper.Night .hot-card { background: #23252b; border-bottom-color: #303239; }
+    #Wrapper.Night .hot-card:hover { background: #2a2d34; }
+    #Wrapper.Night .rank-1 { background: linear-gradient(90deg, #2e2a1d 0%, #23252b 100%); }
+    #Wrapper.Night .user-name { color: #dfe2e8; }
+    #Wrapper.Night .card-content { color: #d3d7de; }
+    #Wrapper.Night .card-content pre { background: #1c1e23; border-color: #303239; }
+    #Wrapper.Night .floor-tag { background: #2b2e35; color: #7b818c; }
   `);
 
   // =========================
   // 3) 功能A：每日自动签到
   // =========================
   const Daily = (() => {
-    const CLAIMED_RE = /每日登录奖励已领取|今天的登录奖励已经领取过了(?:哦)?|今天已经领取|已成功领取每日登录奖励|成功领取每日登录奖励|奖励已发放/i;
+    const CLAIMED_RE = /每日登录奖励已(?:领取|发放)|今天的登录奖励已经领取过了(?:哦)?|今天已经领取|已成功领取每日登录奖励|成功领取每日登录奖励|奖励已发放/i;
+    // 已领取的任务页会展示连续登录天数，且不再渲染领取按钮
+    const CONSECUTIVE_RE = /已连续登录\s*\d+\s*天/;
     const REJECTED_RE = /浏览器有一些奇奇怪怪的设置|请用一个干净安装的浏览器重试/i;
-    const MAX_TIMER_MS = 0x7fffffff;
-    let inFlight = null;
-    let nextDayTimer = 0;
 
-    function requestText(url) {
+    // 网络抖动/限流属于可重试错误，与"页面结构变了""登录失效"区分开，
+    // 避免一次超时就弹一个失败通知并放弃当天签到。
+    class RetryableError extends Error {}
+
+    let inFlight = null;
+    let retryTimer = 0;
+    let networkFailures = 0;
+
+    function requestText(url, referer) {
       const target = new URL(url, location.origin);
       if (target.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
+      const headers = { Accept: 'text/html,application/xhtml+xml' };
+      // V2EX 的领取接口会校验来源页，缺少 Referer 时请求会被判为异常来源而不发放奖励。
+      if (referer) {
+        try { headers.Referer = new URL(referer, location.origin).href; } catch (_) {}
+      }
       return new Promise((resolve, reject) => {
         GM_xmlhttpRequest({
           method: 'GET',
           url: target.href,
           responseType: 'text',
           timeout: CONFIG.daily.requestTimeoutMs,
-          headers: { Accept: 'text/html,application/xhtml+xml' },
+          headers,
           onload: response => {
             if (response.status < 200 || response.status >= 400) {
-              reject(new Error(`HTTP ${response.status} for ${target.pathname}`));
+              reject(new RetryableError(`HTTP ${response.status} for ${target.pathname}`));
               return;
             }
             resolve({
@@ -431,9 +750,9 @@
               finalUrl: response.finalUrl || target.href,
             });
           },
-          ontimeout: () => reject(new Error(`请求超时：${target.pathname}`)),
-          onerror: () => reject(new Error(`请求失败：${target.pathname}`)),
-          onabort: () => reject(new Error(`请求已取消：${target.pathname}`)),
+          ontimeout: () => reject(new RetryableError(`请求超时：${target.pathname}`)),
+          onerror: () => reject(new RetryableError(`请求失败：${target.pathname}`)),
+          onabort: () => reject(new RetryableError(`请求已取消：${target.pathname}`)),
         });
       });
     }
@@ -453,7 +772,11 @@
     }
 
     function alreadyRedeemed(doc) {
-      return !!doc.querySelector('li.fa.fa-ok-sign, .fa-ok-sign') || CLAIMED_RE.test(pageText(doc));
+      if (doc.querySelector('#Main .fa-ok-sign')) return true;
+      const text = pageText(doc);
+      if (CLAIMED_RE.test(text)) return true;
+      // 兜底：任务页已渲染连续登录天数却没有领取入口 → 今日已领取
+      return CONSECUTIVE_RE.test(text) && !findRedeemUrl(doc);
     }
 
     function findRedeemUrl(doc) {
@@ -477,8 +800,8 @@
       return null;
     }
 
-    async function loadPage(url) {
-      const response = await requestText(url);
+    async function loadPage(url, referer) {
+      const response = await requestText(url, referer);
       const doc = parseHtml(response.text);
       return { ...response, doc };
     }
@@ -495,7 +818,7 @@
       let lastStatus = 'unknown';
       for (let attempt = 0; attempt < retries; attempt++) {
         if (attempt > 0) await sleep(intervalMs);
-        const result = await loadPage(page);
+        const result = await loadPage(page, location.href);
         if (isSignedOut(result.doc, result.finalUrl)) return { status: 'signed-out', result };
         if (REJECTED_RE.test(pageText(result.doc))) return { status: 'rejected', result };
         if (alreadyRedeemed(result.doc)) return { status: 'claimed', result };
@@ -506,50 +829,46 @@
 
     async function execute() {
       const {
-        notify: doNotify, page, delayMinMs, delayMaxMs, storeKey,
+        page, delayMinMs, delayMaxMs, storeKey,
         verifyRetries, verifyIntervalMs,
       } = CONFIG.daily;
-      const today = ymdUtc();
-      if (GM_getValue(storeKey, '') === today) return;
-      if (isSignedOut(document, location.href)) {
-        log('签到：账号未登录，已跳过');
-        return;
-      }
+      const today = ymd();
+      if (GM.get(storeKey, '') === today) return 'already-done';
+      if (isSignedOut(document, location.href)) return 'signed-out';
+
       const lockKey = `${storeKey}_lock`;
-      const lock = GM_getValue(lockKey, null);
-      if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) return;
+      const lock = GM.get(lockKey, null);
+      // 跨标签页互斥：5 分钟内已有实例在跑就让路（也兼容进程被杀导致的锁残留）
+      if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) return 'locked';
 
       const token = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      GM_setValue(lockKey, { date: today, startedAt: Date.now(), token });
-      const dailyNotify = text => { if (doNotify) notify('V2EX 签到', text); };
+      GM.set(lockKey, { date: today, startedAt: Date.now(), token });
 
       try {
         await sleep(randInt(delayMinMs, delayMaxMs));
-        const daily = await loadPage(page);
-        if (isSignedOut(daily.doc, daily.finalUrl)) {
-          log('签到：账号未登录，已跳过');
-          return;
-        }
-        if (REJECTED_RE.test(pageText(daily.doc))) {
-          throw new Error('V2EX 拒绝了当前浏览器环境');
-        }
+        // 等待期间可能已被其它标签页完成
+        if (GM.get(storeKey, '') === today) return 'already-done';
+
+        const daily = await loadPage(page, location.href);
+        if (isSignedOut(daily.doc, daily.finalUrl)) return 'signed-out';
+        if (REJECTED_RE.test(pageText(daily.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
+
         if (alreadyRedeemed(daily.doc)) {
-          GM_setValue(storeKey, today);
-          log('签到：今日奖励已领取');
-          dailyNotify('今日奖励已领取');
-          return;
+          GM.set(storeKey, today);
+          return 'already-claimed';
         }
 
         const redeemUrl = findRedeemUrl(daily.doc);
-        if (!redeemUrl) {
-          throw new Error('未找到领取按钮（页面结构可能已变更）');
-        }
+        if (!redeemUrl) throw new Error('未找到领取按钮（页面结构可能已变更）');
 
         const target = validateRedeemUrl(redeemUrl);
-        const redeem = await loadPage(target.href);
+        // 领取请求必须带上任务页作为 Referer
+        const redeem = await loadPage(target.href, page);
         if (isSignedOut(redeem.doc, redeem.finalUrl)) throw new Error('登录状态已失效');
         if (REJECTED_RE.test(pageText(redeem.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
 
+        // 领取后 V2EX 通常跳转到 /balance，页面本身不含"已领取"字样，
+        // 因此需要回到任务页确认，而不是把跳转当作失败。
         let confirmed = alreadyRedeemed(redeem.doc);
         if (!confirmed) {
           const verification = await verifyClaimed(page, verifyRetries, verifyIntervalMs);
@@ -558,48 +877,56 @@
           confirmed = verification.status === 'claimed';
         }
 
-        if (confirmed) {
-          GM_setValue(storeKey, today);
-          log('签到：领取成功');
-          dailyNotify('领取成功 ✅');
-        } else {
-          throw new Error('领取请求已发送，但服务端未确认成功');
-        }
+        if (!confirmed) throw new RetryableError('领取请求已发送，但服务端未确认成功');
+
+        GM.set(storeKey, today);
+        return 'claimed';
       } finally {
-        if (GM_getValue(lockKey, null)?.token === token) GM_setValue(lockKey, null);
+        if (GM.get(lockKey, null)?.token === token) GM.set(lockKey, null);
       }
     }
 
     function run() {
       if (inFlight) return inFlight;
-      inFlight = execute().catch(err => {
+      inFlight = execute().then(status => {
+        networkFailures = 0;
+        if (status === 'claimed') {
+          log('签到：领取成功');
+          if (CONFIG.daily.notify) notify('V2EX 签到', '领取成功 ✅');
+        } else if (status === 'already-claimed') {
+          // 已在别处领取过：只记日志，不打扰用户
+          log('签到：今日奖励已领取');
+        } else if (status === 'signed-out') {
+          log('签到：账号未登录，已跳过');
+        }
+        return status;
+      }).catch(err => {
+        const { networkRetries, networkRetryDelayMs, notify: doNotify } = CONFIG.daily;
+        if (err instanceof RetryableError && networkFailures < networkRetries) {
+          networkFailures++;
+          log(`签到暂时失败（第 ${networkFailures}/${networkRetries} 次），稍后重试：`, err);
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(run, networkRetryDelayMs);
+          return 'retrying';
+        }
+        networkFailures = 0;
         log('签到失败：', err);
-        if (CONFIG.daily.notify) notify('V2EX 签到', `失败：${err?.message || err}`);
+        if (doNotify) notify('V2EX 签到', `失败：${err?.message || err}`);
+        return 'failed';
       }).finally(() => { inFlight = null; });
       return inFlight;
     }
 
-    function scheduleNextUtcDay() {
-      if (nextDayTimer) clearTimeout(nextDayTimer);
-      const now = Date.now();
-      const current = new Date(now);
-      const nextUtcDay = Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), current.getUTCDate() + 1);
-      const delay = Math.min(nextUtcDay - now + randInt(30000, 120000), MAX_TIMER_MS);
-      nextDayTimer = setTimeout(() => {
-        run().finally(scheduleNextUtcDay);
-      }, delay);
-    }
-
     function boot() {
-      const start = () => setTimeout(run, 800);
+      const tick = () => { if (GM.get(CONFIG.daily.storeKey, '') !== ymd()) run(); };
+      const start = () => setTimeout(tick, 800);
       if (document.readyState === 'complete') start();
       else window.addEventListener('load', start, { once: true });
 
-      // 页面跨 UTC 日期保持打开时也会重试；后台标签页恢复可见时再补一次。
-      scheduleNextUtcDay();
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && GM_getValue(CONFIG.daily.storeKey, '') !== ymdUtc()) run();
-      });
+      // 长期打开的页面靠轮询跨天补签；后台标签页恢复可见时立刻补一次。
+      // 轮询本身零成本：当天已签到时 tick 不会发出任何请求。
+      setInterval(tick, CONFIG.daily.pollIntervalMs);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
     }
     return { boot, run };
   })();
@@ -874,6 +1201,25 @@
     function saveCollapsedSet(topicId, set) {
       try { sessionStorage.setItem(collapseKey(topicId), JSON.stringify([...set])); }
       catch (err) { log('Collapse state error:', err); }
+    }
+
+    // j/k 或锚点跳转可能落在被折叠的子树里，滚动过去会看到"空白"。
+    // 先展开沿途所有折叠祖先，并同步持久化状态。
+    function revealAncestors(el) {
+      if (!el) return;
+      const collapsed = [];
+      for (let node = el.parentElement; node; node = node.parentElement) {
+        if (node.classList?.contains('reply-children') && node.classList.contains('is-collapsed')) {
+          collapsed.push(node);
+        }
+      }
+      if (!collapsed.length) return;
+      const state = collapsed[collapsed.length - 1].closest('.box')?._v2CollapseState;
+      for (const node of collapsed) {
+        node.classList.remove('is-collapsed');
+        state?.collapsedSet.delete(node.dataset.replyId);
+      }
+      if (state) saveCollapsedSet(state.topicId, state.collapsedSet);
     }
 
     // ── 渲染树 ──
@@ -1153,7 +1499,7 @@
             last = m.index + token.length;
           }
 
-          if (changed) {
+          if (changed && node.parentNode) {
             frag.appendChild(document.createTextNode(text.slice(last)));
             node.parentNode.replaceChild(frag, node);
           }
@@ -1226,6 +1572,23 @@
       return results;
     }
 
+    // 个别页失败多半是并发触发的限流，静默重试一次再打扰用户。
+    // 全军覆没则更可能是断网/掉登录，直接交给横幅让用户决定，避免再空等一轮超时。
+    async function fetchPagesWithRetry(pages, onProgress) {
+      const results = await fetchPages(pages, onProgress);
+      const failedIndexes = results
+        .map((result, index) => (result.replies ? -1 : index))
+        .filter(index => index >= 0);
+      if (!failedIndexes.length || failedIndexes.length === results.length) return results;
+
+      await sleep(600);
+      const retried = await fetchPages(failedIndexes.map(index => results[index].page));
+      failedIndexes.forEach((resultIndex, i) => {
+        if (retried[i]?.replies) results[resultIndex] = retried[i];
+      });
+      return results;
+    }
+
     function normalizeReplies(replies) {
       const byId = new Map();
       for (const reply of replies) {
@@ -1256,7 +1619,7 @@
         ? requestedPage
         : 1;
       const pages = Array.from({ length: totalPages }, (_, i) => i + 1).filter(page => page !== currentPage);
-      const pageResults = await fetchPages(pages, (completed, total) => {
+      const pageResults = await fetchPagesWithRetry(pages, (completed, total) => {
         loadingBar.textContent = `加载回复页 ${completed} / ${total}…`;
       });
 
@@ -1274,6 +1637,7 @@
       const readState = createReadState(topicId);
       let newCount = markUnread(readState, allReplies);
       renderTree(allReplies, maps, replyBox, topicId);
+      UserTags.decorate(replyBox);
 
       loadingBar.remove();
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
@@ -1312,6 +1676,7 @@
               maps = buildLookupMaps(allReplies);
               newCount = markUnread(readState, allReplies);
               renderTree(allReplies, maps, replyBox, topicId);
+              UserTags.decorate(replyBox);
               updateNewCountBar(replyBox, newCount);
               scheduleHoverPreview();
             }
@@ -1337,7 +1702,7 @@
         log('ThreadTree error:', err);
       });
     }
-    return { boot };
+    return { boot, revealAncestors };
   })();
 
   // =========================
@@ -1469,6 +1834,8 @@
 
       overlay.appendChild(container);
       document.body.appendChild(overlay);
+      // 浮层挂在 body 上，不在 UserTags 的观察范围内，需要显式装饰一次
+      UserTags.decorate(overlay);
       overlay.addEventListener('click', e => { if (e.target === overlay) closeOverlay(overlay); });
       const onKey = e => {
         if (e.key !== 'Escape' || document.getElementById('v2ex-lightbox')?.classList.contains('active')) return;
@@ -1552,13 +1919,21 @@
         ? Math.min(curIndex + 1, newReplies.length - 1)
         : (curIndex < 0 ? newReplies.length - 1 : Math.max(curIndex - 1, 0));
       const target = newReplies[curIndex];
-      setActive(target); scrollToReply(target); showHud(curIndex, newReplies.length, direction);
+      setActive(target);
+      // 目标可能藏在折叠的子树里，先展开再滚动，否则会滚到一片空白
+      ThreadTree.revealAncestors(target);
+      scrollToReply(target);
+      showHud(curIndex, newReplies.length, direction);
     }
     function onKeyDown(e) {
       const tag = document.activeElement?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || document.activeElement?.isContentEditable) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // 有浮层时把按键让给浮层
       if (document.getElementById('hot-overlay')?.classList.contains('active')) return;
+      if (document.getElementById('v2t-manager')?.classList.contains('active')) return;
+      if (document.getElementById('v2ex-lightbox')?.classList.contains('active')) return;
+      if (document.getElementById('v2t-editor')?.classList.contains('visible')) return;
       if (e.key === 'j') { e.preventDefault(); navigate('next'); }
       else if (e.key === 'k') { e.preventDefault(); navigate('prev'); }
     }
@@ -1624,9 +1999,811 @@
   })();
 
   // =========================
-  // 9) 启动
+  // 9) 功能G：用户标签（本地存储 / 导入导出 / 合并）
+  // =========================
+  const UserTags = (() => {
+    const { storeKey, maxTagLength, tombstoneTtlMs, exportVersion } = CONFIG.tags;
+
+    const COLORS = [
+      { key: 'blue',   hex: '#4a7af0' },
+      { key: 'green',  hex: '#2f9e5e' },
+      { key: 'orange', hex: '#e08b26' },
+      { key: 'red',    hex: '#e0483a' },
+      { key: 'purple', hex: '#8b5cf6' },
+      { key: 'teal',   hex: '#0f9b9b' },
+      { key: 'pink',   hex: '#db2f92' },
+      { key: 'gray',   hex: '#78808f' },
+    ];
+    const COLOR_MAP = new Map(COLORS.map(c => [c.key, c.hex]));
+    const DEFAULT_COLOR = 'blue';
+
+    // 会员链接出现的三处位置：回复楼层、主题头部作者、高赞阅览室卡片
+    const AUTHOR_SELECTOR = [
+      'div.cell[id^="r_"] strong > a[href*="/member/"]',
+      '#Main .header small.gray > a[href*="/member/"]',
+      '.hot-card a.user-name',
+    ].join(',');
+
+    // ── 存储层 ──
+    // 结构：{ v, tags: { <小写用户名>: {name, tag, color, updatedAt} }, deleted: { <小写用户名>: ts } }
+    // deleted 是墓碑，保证"删除"在跨浏览器合并时也能正确传播（否则旧数据会把删掉的标签复活）。
+    let store = null;
+
+    const emptyStore = () => ({ v: exportVersion, tags: {}, deleted: {} });
+    const keyOf = name => String(name ?? '').trim().toLowerCase();
+
+    function sanitizeEntry(raw, fallbackName) {
+      if (!raw || typeof raw !== 'object') return null;
+      const tag = typeof raw.tag === 'string' ? raw.tag.replace(/\s+/g, ' ').trim().slice(0, maxTagLength) : '';
+      if (!tag) return null;
+      const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : String(fallbackName ?? '').trim();
+      const updatedAt = Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 ? raw.updatedAt : 0;
+      return {
+        name: name || tag,
+        tag,
+        color: COLOR_MAP.has(raw.color) ? raw.color : DEFAULT_COLOR,
+        updatedAt,
+      };
+    }
+
+    function normalizeStore(raw) {
+      const next = emptyStore();
+      if (!raw || typeof raw !== 'object') return next;
+      for (const [k, v] of Object.entries(raw.tags || {})) {
+        const key = keyOf(k);
+        const entry = sanitizeEntry(v, k);
+        if (key && entry) next.tags[key] = entry;
+      }
+      for (const [k, v] of Object.entries(raw.deleted || {})) {
+        const key = keyOf(k);
+        const ts = Number(v);
+        if (key && Number.isFinite(ts) && ts > 0) next.deleted[key] = ts;
+      }
+      return next;
+    }
+
+    function pruneTombstones(target, now = Date.now()) {
+      for (const [k, ts] of Object.entries(target.deleted)) {
+        if (now - ts > tombstoneTtlMs) delete target.deleted[k];
+      }
+      return target;
+    }
+
+    function load() {
+      if (!store) store = normalizeStore(GM.get(storeKey, null));
+      return store;
+    }
+
+    function persist(next) {
+      pruneTombstones(next);
+      store = next;
+      GM.set(storeKey, next);
+      repaintAll();
+      Manager.refresh();
+    }
+
+    const get = name => load().tags[keyOf(name)] || null;
+
+    function setTag(name, tag, color) {
+      const key = keyOf(name);
+      if (!key) return false;
+      const entry = sanitizeEntry({ name, tag, color, updatedAt: Date.now() }, name);
+      if (!entry) return removeTag(name);
+      const next = { v: exportVersion, tags: { ...load().tags }, deleted: { ...load().deleted } };
+      next.tags[key] = entry;
+      delete next.deleted[key];
+      persist(next);
+      return true;
+    }
+
+    function removeTag(name) {
+      const key = keyOf(name);
+      const current = load();
+      if (!key || !current.tags[key]) return false;
+      const next = { v: exportVersion, tags: { ...current.tags }, deleted: { ...current.deleted } };
+      delete next.tags[key];
+      next.deleted[key] = Date.now();
+      persist(next);
+      return true;
+    }
+
+    function entries() {
+      return Object.entries(load().tags)
+        .map(([key, entry]) => ({ key, ...entry }))
+        .sort((a, b) => b.updatedAt - a.updatedAt || a.key.localeCompare(b.key));
+    }
+
+    // 最近使用过的标签文本，按使用频次 + 新旧排序，用作编辑气泡里的快捷输入
+    function suggestions(limit = 8) {
+      const counter = new Map();
+      for (const entry of Object.values(load().tags)) {
+        const item = counter.get(entry.tag) || { tag: entry.tag, count: 0, updatedAt: 0 };
+        item.count++;
+        item.updatedAt = Math.max(item.updatedAt, entry.updatedAt);
+        counter.set(entry.tag, item);
+      }
+      return [...counter.values()]
+        .sort((a, b) => b.count - a.count || b.updatedAt - a.updatedAt)
+        .slice(0, limit);
+    }
+
+    // ── 导入 / 导出 / 合并 ──
+    function exportPayload() {
+      const current = load();
+      return {
+        app: 'v2ex-tweaks',
+        kind: 'user-tags',
+        version: exportVersion,
+        exportedAt: Date.now(),
+        count: Object.keys(current.tags).length,
+        tags: current.tags,
+        deleted: current.deleted,
+      };
+    }
+
+    // 兼容三种输入：本脚本导出的完整包、只有 {tags:{…}} 的裁剪包、
+    // 以及手写的 { 用户名: "标签文本" } 简易映射。
+    function parseImport(text) {
+      let data;
+      try { data = JSON.parse(text); }
+      catch (_) { throw new Error('不是合法的 JSON 文件'); }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('文件内容不是标签数据');
+
+      // 带信封的导出包必须走 data.tags，否则 app/kind/version 这些元字段会被当成用户名
+      const hasEnvelope = ['app', 'kind', 'version', 'exportedAt', 'count', 'tags', 'deleted']
+        .some(field => field in data);
+      if (hasEnvelope && (!data.tags || typeof data.tags !== 'object')) {
+        throw new Error('文件缺少 tags 字段');
+      }
+      const rawTags = hasEnvelope ? data.tags : data;
+      const rawDeleted = (data.deleted && typeof data.deleted === 'object') ? data.deleted : {};
+
+      const tags = {};
+      const deleted = {};
+      let invalid = 0;
+      for (const [k, v] of Object.entries(rawTags)) {
+        const key = keyOf(k);
+        const entry = typeof v === 'string' ? sanitizeEntry({ tag: v }, k) : sanitizeEntry(v, k);
+        if (!key || !entry) { invalid++; continue; }
+        if (!tags[key] || entry.updatedAt > tags[key].updatedAt) tags[key] = entry;
+      }
+      for (const [k, v] of Object.entries(rawDeleted)) {
+        const key = keyOf(k);
+        const ts = Number(v);
+        if (key && Number.isFinite(ts) && ts > 0) deleted[key] = ts;
+      }
+      if (!Object.keys(tags).length && !Object.keys(deleted).length) throw new Error('文件里没有可导入的标签');
+      return { tags, deleted, invalid };
+    }
+
+    // strategy: smart（按更新时间取新，尊重删除墓碑）/ add（只补充本地没有的）/ replace（用文件完全覆盖）
+    function computeMerge(incoming, strategy) {
+      const base = load();
+      const next = strategy === 'replace'
+        ? emptyStore()
+        : { v: exportVersion, tags: { ...base.tags }, deleted: { ...base.deleted } };
+
+      for (const [key, entry] of Object.entries(incoming.tags)) {
+        const local = next.tags[key];
+        if (strategy === 'add') {
+          if (!local) { next.tags[key] = entry; delete next.deleted[key]; }
+          continue;
+        }
+        if (strategy === 'smart' && (next.deleted[key] || 0) > entry.updatedAt) continue;
+        if (!local || entry.updatedAt > local.updatedAt) {
+          next.tags[key] = entry;
+          delete next.deleted[key];
+        }
+      }
+
+      if (strategy !== 'add') {
+        for (const [key, ts] of Object.entries(incoming.deleted)) {
+          const local = next.tags[key];
+          if (local && ts > local.updatedAt) delete next.tags[key];
+          if (!next.tags[key]) next.deleted[key] = Math.max(next.deleted[key] || 0, ts);
+        }
+      }
+
+      pruneTombstones(next);
+
+      const stats = { added: 0, updated: 0, removed: 0, unchanged: 0, invalid: incoming.invalid };
+      for (const [key, entry] of Object.entries(next.tags)) {
+        const local = base.tags[key];
+        if (!local) stats.added++;
+        else if (local.tag !== entry.tag || local.color !== entry.color) stats.updated++;
+        else stats.unchanged++;
+      }
+      for (const key of Object.keys(base.tags)) if (!next.tags[key]) stats.removed++;
+      return { stats, next };
+    }
+
+    function download(filename, text) {
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/json;charset=utf-8' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    // ── Toast ──
+    let toastTimer = 0;
+    function toast(message) {
+      let el = document.getElementById('v2t-toast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'v2t-toast';
+        document.body.appendChild(el);
+      }
+      el.textContent = message;
+      requestAnimationFrame(() => el.classList.add('visible'));
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove('visible'), 2200);
+    }
+
+    // ── 胶囊渲染 ──
+    function lightenHex(hex, amount) {
+      const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+      if (!m) return hex;
+      const n = parseInt(m[1], 16);
+      const mix = c => Math.round(c + (255 - c) * amount);
+      const r = mix((n >> 16) & 255), g = mix((n >> 8) & 255), b = mix(n & 255);
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function userFromLink(anchor) {
+      try {
+        const path = new URL(anchor.getAttribute('href') || '', location.origin).pathname;
+        const m = /^\/member\/([^/?#]+)/.exec(path);
+        return m ? decodeURIComponent(m[1]) : '';
+      } catch (_) { return ''; }
+    }
+
+    function paintSlot(slot) {
+      const user = slot.dataset.user;
+      const entry = get(user);
+      if (entry) {
+        const hex = COLOR_MAP.get(entry.color) || COLOR_MAP.get(DEFAULT_COLOR);
+        const chip = document.createElement('span');
+        chip.className = 'v2t-chip';
+        chip.textContent = entry.tag;
+        chip.title = `${entry.name || user} · 点击编辑标签`;
+        chip.setAttribute('role', 'button');
+        chip.tabIndex = 0;
+        chip.style.setProperty('--v2t-chip-bg', hexToRgba(hex, 0.13));
+        chip.style.setProperty('--v2t-chip-fg', hex);
+        chip.style.setProperty('--v2t-chip-bd', hexToRgba(hex, 0.32));
+        chip.style.setProperty('--v2t-chip-bg-n', hexToRgba(hex, 0.22));
+        chip.style.setProperty('--v2t-chip-fg-n', lightenHex(hex, 0.38));
+        chip.style.setProperty('--v2t-chip-bd-n', hexToRgba(hex, 0.45));
+        slot.replaceChildren(chip);
+        return;
+      }
+      const add = document.createElement('span');
+      add.className = 'v2t-add';
+      add.textContent = '+';
+      add.title = `给 ${user} 添加标签`;
+      add.setAttribute('role', 'button');
+      add.setAttribute('aria-label', `给 ${user} 添加标签`);
+      add.tabIndex = 0;
+      slot.replaceChildren(add);
+    }
+
+    function attachSlot(anchor) {
+      if (anchor.dataset.v2tBound === '1') return;
+      const user = userFromLink(anchor);
+      if (!user) return;
+      anchor.dataset.v2tBound = '1';
+      const slot = document.createElement('span');
+      slot.className = 'v2t-slot';
+      slot.dataset.user = user;
+      anchor.insertAdjacentElement('afterend', slot);
+      paintSlot(slot);
+    }
+
+    function decorate(root = document) {
+      if (root.nodeType === Node.ELEMENT_NODE && root.matches?.(AUTHOR_SELECTOR)) attachSlot(root);
+      root.querySelectorAll?.(AUTHOR_SELECTOR).forEach(attachSlot);
+    }
+
+    function repaintAll() {
+      document.querySelectorAll('.v2t-slot').forEach(paintSlot);
+    }
+
+    // ── 编辑气泡 ──
+    const Editor = (() => {
+      let el = null;
+      let currentUser = '';
+      let currentColor = DEFAULT_COLOR;
+      let anchorEl = null;
+
+      function place() {
+        if (!el || !anchorEl?.isConnected) return;
+        const rect = anchorEl.getBoundingClientRect();
+        const width = el.offsetWidth || 268;
+        const height = el.offsetHeight || 180;
+        const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+        const top = (window.innerHeight - rect.bottom > height + 12)
+          ? rect.bottom + 8
+          : Math.max(8, rect.top - height - 8);
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+      }
+
+      function close() {
+        if (!el) return;
+        el.classList.remove('visible');
+        el.style.pointerEvents = 'none';
+        currentUser = '';
+        anchorEl = null;
+        window.removeEventListener('scroll', place, true);
+        window.removeEventListener('resize', place);
+      }
+
+      function isOpen() { return !!currentUser; }
+
+      function build() {
+        el = document.createElement('div');
+        el.id = 'v2t-editor';
+        document.body.appendChild(el);
+        // 气泡内部的点击不能冒泡到"点击外部关闭"的全局监听
+        el.addEventListener('mousedown', e => e.stopPropagation());
+        return el;
+      }
+
+      function open(user, anchor) {
+        if (!el) build();
+        if (currentUser && keyOf(currentUser) === keyOf(user)) { close(); return; }
+        currentUser = user;
+        anchorEl = anchor;
+        const existing = get(user);
+        currentColor = existing?.color || DEFAULT_COLOR;
+
+        el.replaceChildren();
+
+        const head = document.createElement('div');
+        head.className = 'v2t-ed-head';
+        const avatar = anchor.closest('.cell, .hot-card, .header')?.querySelector('img.avatar, img.user-avatar');
+        if (avatar?.src) {
+          const img = document.createElement('img');
+          img.src = avatar.src;
+          img.alt = '';
+          head.appendChild(img);
+        }
+        const nameEl = document.createElement('b');
+        nameEl.textContent = user;
+        head.append(nameEl, document.createTextNode(existing ? '· 编辑标签' : '· 新建标签'));
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.maxLength = maxTagLength;
+        input.placeholder = '例如：靠谱 / 杠精 / 同行…';
+        input.value = existing?.tag || '';
+        input.setAttribute('aria-label', `${user} 的标签`);
+
+        const swatches = document.createElement('div');
+        swatches.className = 'v2t-swatches';
+        for (const { key, hex } of COLORS) {
+          const dot = document.createElement('span');
+          dot.className = 'v2t-swatch' + (key === currentColor ? ' selected' : '');
+          dot.style.background = hex;
+          dot.style.color = hex;
+          dot.title = key;
+          dot.setAttribute('role', 'button');
+          dot.setAttribute('aria-label', `颜色 ${key}`);
+          dot.addEventListener('click', () => {
+            currentColor = key;
+            swatches.querySelectorAll('.v2t-swatch').forEach(s => s.classList.remove('selected'));
+            dot.classList.add('selected');
+            input.focus();
+          });
+          swatches.appendChild(dot);
+        }
+
+        el.append(head, input, swatches);
+
+        const recent = suggestions().filter(item => item.tag !== input.value);
+        if (recent.length) {
+          const list = document.createElement('div');
+          list.className = 'v2t-recent';
+          for (const item of recent) {
+            const chip = document.createElement('span');
+            chip.className = 'v2t-recent-item';
+            chip.textContent = item.tag;
+            chip.title = `已用于 ${item.count} 人`;
+            chip.addEventListener('click', () => { input.value = item.tag; input.focus(); });
+            list.appendChild(chip);
+          }
+          el.appendChild(list);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'v2t-ed-actions';
+        if (existing) {
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'v2t-btn danger';
+          del.textContent = '删除';
+          del.addEventListener('click', () => {
+            removeTag(user);
+            toast(`已删除 ${user} 的标签`);
+            close();
+          });
+          actions.appendChild(del);
+        }
+        const spacer = document.createElement('span');
+        spacer.className = 'v2t-spacer';
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'v2t-btn';
+        cancel.textContent = '取消';
+        cancel.addEventListener('click', close);
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'v2t-btn primary';
+        save.textContent = '保存';
+
+        const commit = () => {
+          const value = input.value.trim();
+          if (!value) {
+            if (existing) { removeTag(user); toast(`已删除 ${user} 的标签`); }
+            close();
+            return;
+          }
+          setTag(user, value, currentColor);
+          toast(`已${existing ? '更新' : '添加'} ${user} 的标签`);
+          close();
+        };
+        save.addEventListener('click', commit);
+        input.addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); commit(); }
+          else if (e.key === 'Escape') { e.preventDefault(); close(); }
+        });
+
+        actions.append(spacer, cancel, save);
+        el.appendChild(actions);
+
+        el.style.pointerEvents = 'auto';
+        place();
+        requestAnimationFrame(() => {
+          el.classList.add('visible');
+          place();
+          input.focus();
+          input.select();
+        });
+        window.addEventListener('scroll', place, true);
+        window.addEventListener('resize', place);
+      }
+
+      return { open, close, isOpen };
+    })();
+
+    // ── 管理面板 ──
+    const Manager = (() => {
+      let overlay = null;
+      let listEl = null;
+      let countEl = null;
+      let mergeEl = null;
+      let searchEl = null;
+      let pending = null; // 待确认的导入数据
+      let strategy = 'smart';
+
+      function isOpen() { return !!overlay?.classList.contains('active'); }
+
+      function renderList() {
+        if (!listEl) return;
+        const keyword = (searchEl?.value || '').trim().toLowerCase();
+        const all = entries();
+        const rows = keyword
+          ? all.filter(item => item.key.includes(keyword) || item.tag.toLowerCase().includes(keyword))
+          : all;
+
+        countEl.textContent = keyword ? `${rows.length} / ${all.length}` : `${all.length} 个用户`;
+        listEl.replaceChildren();
+
+        if (!rows.length) {
+          const empty = document.createElement('div');
+          empty.className = 'v2t-empty';
+          empty.textContent = all.length ? '没有匹配的标签' : '还没有标签，在主题页把鼠标移到用户名旁点 + 即可添加';
+          listEl.appendChild(empty);
+          return;
+        }
+
+        const fragment = document.createDocumentFragment();
+        for (const item of rows) {
+          const row = document.createElement('div');
+          row.className = 'v2t-row';
+
+          const user = document.createElement('a');
+          user.className = 'v2t-user';
+          user.href = `/member/${encodeURIComponent(item.name || item.key)}`;
+          user.target = '_blank';
+          user.rel = 'noreferrer noopener';
+          user.textContent = item.name || item.key;
+
+          const slot = document.createElement('span');
+          slot.className = 'v2t-slot';
+          slot.dataset.user = item.name || item.key;
+          paintSlot(slot);
+
+          const time = document.createElement('span');
+          time.className = 'v2t-time';
+          time.textContent = item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : '—';
+
+          const edit = document.createElement('span');
+          edit.className = 'v2t-row-act';
+          edit.textContent = '编辑';
+          edit.setAttribute('role', 'button');
+          edit.addEventListener('click', () => Editor.open(item.name || item.key, edit));
+
+          const del = document.createElement('span');
+          del.className = 'v2t-row-act danger';
+          del.textContent = '删除';
+          del.setAttribute('role', 'button');
+          del.addEventListener('click', () => { removeTag(item.key); });
+
+          row.append(user, slot, time, edit, del);
+          fragment.appendChild(row);
+        }
+        listEl.appendChild(fragment);
+      }
+
+      function renderMerge() {
+        if (!mergeEl) return;
+        if (!pending) {
+          mergeEl.hidden = true;
+          mergeEl.replaceChildren();
+          return;
+        }
+        const { stats } = computeMerge(pending, strategy);
+        mergeEl.hidden = false;
+        mergeEl.replaceChildren();
+
+        const title = document.createElement('div');
+        title.innerHTML = `准备导入 <b>${Object.keys(pending.tags).length}</b> 条标签`
+          + (pending.invalid ? `（已忽略 <b>${pending.invalid}</b> 条无效记录）` : '');
+
+        const opts = document.createElement('div');
+        opts.className = 'v2t-merge-opts';
+        const choices = [
+          ['smart', '智能合并（保留较新，推荐）'],
+          ['add', '仅新增（不动本地已有）'],
+          ['replace', '覆盖本地（清空后导入）'],
+        ];
+        for (const [value, label] of choices) {
+          const wrap = document.createElement('label');
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = 'v2t-merge-strategy';
+          radio.value = value;
+          radio.checked = strategy === value;
+          radio.addEventListener('change', () => { strategy = value; renderMerge(); });
+          wrap.append(radio, document.createTextNode(label));
+          opts.appendChild(wrap);
+        }
+
+        const summary = document.createElement('div');
+        summary.innerHTML = `结果：新增 <b>${stats.added}</b> · 更新 <b>${stats.updated}</b> · 删除 <b>${stats.removed}</b> · 不变 <b>${stats.unchanged}</b>`;
+
+        const actions = document.createElement('div');
+        actions.className = 'v2t-ed-actions';
+        const spacer = document.createElement('span');
+        spacer.className = 'v2t-spacer';
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'v2t-btn';
+        cancel.textContent = '取消';
+        cancel.addEventListener('click', () => { pending = null; renderMerge(); });
+        const apply = document.createElement('button');
+        apply.type = 'button';
+        apply.className = 'v2t-btn primary';
+        apply.textContent = '应用';
+        apply.addEventListener('click', () => {
+          const { stats: applied, next } = computeMerge(pending, strategy);
+          pending = null;
+          persist(next);
+          toast(`导入完成：新增 ${applied.added} · 更新 ${applied.updated} · 删除 ${applied.removed}`);
+        });
+        actions.append(spacer, cancel, apply);
+
+        mergeEl.append(title, opts, summary, actions);
+      }
+
+      function pickFile() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/json,.json';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0];
+          input.remove();
+          if (!file) return;
+          try {
+            pending = parseImport(await file.text());
+            strategy = 'smart';
+            renderMerge();
+          } catch (err) {
+            pending = null;
+            renderMerge();
+            toast(`导入失败：${err.message}`);
+          }
+        }, { once: true });
+        input.click();
+      }
+
+      function build() {
+        overlay = document.createElement('div');
+        overlay.id = 'v2t-manager';
+
+        const panel = document.createElement('div');
+        panel.className = 'v2t-panel';
+
+        const head = document.createElement('div');
+        head.className = 'v2t-panel-head';
+        const title = document.createElement('span');
+        title.className = 'v2t-title';
+        title.textContent = '用户标签';
+        countEl = document.createElement('span');
+        countEl.className = 'v2t-count';
+        searchEl = document.createElement('input');
+        searchEl.type = 'text';
+        searchEl.className = 'v2t-search';
+        searchEl.placeholder = '搜索用户或标签…';
+        searchEl.addEventListener('input', debounce(renderList, 120));
+        head.append(title, countEl, searchEl);
+
+        listEl = document.createElement('div');
+        listEl.className = 'v2t-list';
+
+        mergeEl = document.createElement('div');
+        mergeEl.className = 'v2t-merge';
+        mergeEl.hidden = true;
+
+        const foot = document.createElement('div');
+        foot.className = 'v2t-panel-foot';
+        const exportBtn = document.createElement('button');
+        exportBtn.type = 'button';
+        exportBtn.className = 'v2t-btn';
+        exportBtn.textContent = '导出';
+        exportBtn.addEventListener('click', () => {
+          const payload = exportPayload();
+          if (!payload.count) { toast('还没有标签可导出'); return; }
+          download(`v2ex-user-tags-${ymd()}.json`, JSON.stringify(payload, null, 2));
+          toast(`已导出 ${payload.count} 条标签`);
+        });
+        const importBtn = document.createElement('button');
+        importBtn.type = 'button';
+        importBtn.className = 'v2t-btn';
+        importBtn.textContent = '导入';
+        importBtn.addEventListener('click', pickFile);
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'v2t-btn danger';
+        clearBtn.textContent = '清空';
+        clearBtn.addEventListener('click', () => {
+          const current = load();
+          const total = Object.keys(current.tags).length;
+          if (!total) { toast('没有可清空的标签'); return; }
+          if (!window.confirm(`确定删除全部 ${total} 条标签？此操作不可撤销。`)) return;
+          const next = { v: exportVersion, tags: {}, deleted: { ...current.deleted } };
+          const now = Date.now();
+          for (const key of Object.keys(current.tags)) next.deleted[key] = now;
+          persist(next);
+          toast('已清空全部标签');
+        });
+        const spacer = document.createElement('span');
+        spacer.className = 'v2t-spacer';
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'v2t-btn';
+        closeBtn.textContent = '关闭';
+        closeBtn.addEventListener('click', close);
+        foot.append(exportBtn, importBtn, clearBtn, spacer, closeBtn);
+
+        panel.append(head, listEl, mergeEl, foot);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+      }
+
+      function onKey(e) {
+        if (e.key === 'Escape' && isOpen() && !Editor.isOpen()) close();
+      }
+
+      function open() {
+        if (!overlay) build();
+        pending = null;
+        searchEl.value = '';
+        renderMerge();
+        renderList();
+        overlay.classList.add('active');
+        document.addEventListener('keydown', onKey);
+        searchEl.focus();
+      }
+
+      function close() {
+        if (!overlay) return;
+        Editor.close();
+        overlay.classList.remove('active');
+        document.removeEventListener('keydown', onKey);
+      }
+
+      function refresh() {
+        if (isOpen()) { renderList(); renderMerge(); }
+      }
+
+      return { open, close, refresh, isOpen };
+    })();
+
+    // ── 装载 ──
+    function boot() {
+      decorate(document);
+
+      // 统一委托：胶囊 / + 按钮 / 点击空白关闭气泡
+      document.addEventListener('click', e => {
+        const trigger = e.target.closest?.('.v2t-chip, .v2t-add');
+        if (!trigger) return;
+        const slot = trigger.closest('.v2t-slot');
+        if (!slot?.dataset.user) return;
+        e.preventDefault();
+        e.stopPropagation();
+        Editor.open(slot.dataset.user, trigger);
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const trigger = e.target.closest?.('.v2t-chip, .v2t-add');
+        if (!trigger) return;
+        e.preventDefault();
+        trigger.click();
+      });
+      document.addEventListener('mousedown', e => {
+        if (Editor.isOpen() && !e.target.closest?.('.v2t-chip, .v2t-add, #v2t-editor')) Editor.close();
+      });
+
+      const rescan = debounce(() => decorate(document), 150);
+      const root = document.getElementById('Main') || document.body;
+      new MutationObserver(rescan).observe(root, { childList: true, subtree: true });
+
+      // 其它标签页改动标签后同步刷新
+      GM.onChange(storeKey, next => {
+        store = next === undefined ? null : normalizeStore(next);
+        repaintAll();
+        Manager.refresh();
+      });
+
+      GM.menu('用户标签管理…', () => Manager.open());
+
+      if (isTopicPage()) {
+        const mount = () => {
+          const target = document.querySelector('#Main .header h1') || document.querySelector('#Main .box .header');
+          if (!target || document.getElementById('v2t-entry')) return;
+          const btn = document.createElement('span');
+          btn.id = 'v2t-entry';
+          btn.textContent = '标签';
+          btn.title = '管理用户标签（导入 / 导出）';
+          btn.setAttribute('role', 'button');
+          btn.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            Manager.open();
+          });
+          target.appendChild(btn);
+        };
+        setTimeout(mount, 520);
+      }
+    }
+
+    return { boot, decorate, open: () => Manager.open() };
+  })();
+
+  // =========================
+  // 10) 启动
   // =========================
   Daily.boot();
+  UserTags.boot();
   if (isTopicPage()) {
     ThreadTree.boot();
     B64.boot();
