@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.1
+// @version      2.5.2
 // @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -163,12 +163,27 @@
     },
   };
 
+  // #rrggbb → [r, g, b]，解析不出来时返回 null 交给调用方决定退路
+  function parseHex(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
   // 把 hex 颜色转成 rgba，用于标签胶囊的底色/边框（避免依赖 color-mix 的浏览器支持）
   function hexToRgba(hex, alpha) {
-    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-    if (!m) return `rgba(138, 148, 166, ${alpha})`;
-    const n = parseInt(m[1], 16);
-    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+    const rgb = parseHex(hex);
+    if (!rgb) return `rgba(138, 148, 166, ${alpha})`;
+    return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+  }
+
+  // 往白色方向混，用于夜间模式下把偏暗的标签色提亮到可读
+  function lightenHex(hex, amount) {
+    const rgb = parseHex(hex);
+    if (!rgb) return hex;
+    const mix = c => Math.round(c + (255 - c) * amount);
+    return `rgb(${mix(rgb[0])}, ${mix(rgb[1])}, ${mix(rgb[2])})`;
   }
 
   // Shannon 熵：衡量字符串的信息多样性
@@ -418,6 +433,11 @@
       --line-hover: #7fa0f5;
       --bg-hover: #fafbff;
       --new-accent: #4a7af0;
+      /* 未读药丸走"淡底 + 同色字"，不再是整块实心蓝：
+         一屏几十个实心色块会盖过正文，淡底同样能一眼扫出来。 */
+      --new-pill-bg: rgba(74, 122, 240, 0.15);
+      --new-pill-fg: #3f6cd8;
+      --new-pill-bd: rgba(74, 122, 240, 0.30);
     }
 
     .box { padding-bottom: 0 !important; }
@@ -562,7 +582,7 @@
        悬停才出现——鼠标一进一出，NEW 左右横跳，不悬停时又像悬在空处。
        现在直接把状态画进楼层号本身：它是 .fr 的最后一个元素、右边缘就是
        行的右边缘，按钮显不显示都影响不到它，天然对齐成一列。
-       已读 = 安静的灰数字；未读 = 同样尺寸的实心蓝药丸。
+       已读 = 安静的灰数字；未读 = 同样尺寸的淡蓝药丸。
        两种状态只换颜色、不换几何：宽高/内边距/字号全一致，
        否则同一列里未读那几个会明显胖出来。 */
     .reply-wrapper .fr .no {
@@ -581,7 +601,8 @@
       color: #8b9098 !important; border-color: rgba(0, 0, 0, 0.09);
     }
 
-    /* 未读行只留左边一条蓝竖条，不铺任何底色——楼层号那颗实心药丸已经够醒目了。
+    /* 未读行只留左边一条蓝竖条，不铺任何底色——扫读靠这条竖条，
+       楼层号那颗淡蓝药丸只作确认，两者一重一轻不会互相打架。
        3px 边框 + 7px 内边距 = 普通行的 10px，正文左边缘不会跟着错开。
        只有进场那一下闪一次（背景不带 !important，动画才压得住）。 */
     .cell.reply-new {
@@ -593,13 +614,13 @@
       0%   { background-color: rgba(74,122,240,0.18); }
       100% { background-color: transparent; }
     }
-    .cell.reply-new .fr .no {
-      color: #fff !important;
-      background: var(--new-accent) !important;
-      border-color: transparent;
+    /* 淡底 + 同色描边：在白底上比灰数字重、比实心蓝轻，正好落在"能扫到但不抢眼" */
+    .cell.reply-new .fr .no,
+    .cell.reply-new:hover .fr .no {
+      color: var(--new-pill-fg) !important;
+      background: var(--new-pill-bg) !important;
+      border-color: var(--new-pill-bd);
     }
-    /* 未读药丸已经是实心的，别让上面那条 hover 规则再给它描一圈灰边 */
-    .cell.reply-new:hover .fr .no { color: #fff !important; border-color: transparent; }
 
     #v2ex-new-count-bar {
       padding: 6px 12px;
@@ -825,14 +846,23 @@
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
+      --new-pill-bg: rgba(111, 151, 255, 0.18);
+      --new-pill-fg: #9fb8ff;
+      --new-pill-bd: rgba(111, 151, 255, 0.32);
     }
     #Wrapper.Night .reply-wrapper .cell { border-bottom-color: #303239 !important; }
     #Wrapper.Night .reply-wrapper .fr .no { color: #676c75 !important; }
     #Wrapper.Night .reply-wrapper > .cell:hover .fr .no {
       color: #9aa1ab !important; border-color: rgba(255, 255, 255, 0.13);
     }
-    #Wrapper.Night .cell.reply-new .fr .no { color: #10131a !important; }
-    #Wrapper.Night .cell.reply-new:hover .fr .no { color: #10131a !important; border-color: transparent; }
+    /* 夜间的已读/悬停规则带 #Wrapper 前缀，特异性高过通用的未读规则，
+       这里必须同样带前缀重写一次，否则未读药丸会被刷回灰数字 */
+    #Wrapper.Night .cell.reply-new .fr .no,
+    #Wrapper.Night .cell.reply-new:hover .fr .no {
+      color: var(--new-pill-fg) !important;
+      background: var(--new-pill-bg) !important;
+      border-color: var(--new-pill-bd);
+    }
     #Wrapper.Night .reply-collapsed-hint { color: #7b818c; }
     #Wrapper.Night #v2ex-new-count-bar {
       background: linear-gradient(90deg, #262b3a 0%, #23252b 100%);
@@ -1283,7 +1313,7 @@
       const refFloors      = [...content.matchAll(/#(\d+)/g)].map(([, f]) => f);
 
       return {
-        element: cell, id: replyId, index: idx,
+        element: cell, floorEl, id: replyId, index: idx,
         memberName, memberLink: authorEl.href, memberAvatar: avatarEl?.src || '',
         content, floor, floorNum, likes,
         refMemberNames: refMemberNames.length ? refMemberNames : undefined,
@@ -1573,11 +1603,11 @@
       for (const r of replies) {
         if (r.floorNum <= state.lastReadFloor) continue;
         newCount++;
-        // 未读状态全靠这个 class 驱动：行左边的蓝条 + 楼层号变成实心蓝药丸，
+        // 未读状态全靠这个 class 驱动：行左边的蓝条 + 楼层号变成淡蓝药丸，
         // 不再往头部塞任何额外节点（见 .cell.reply-new .fr .no）
         r.element.classList.add('reply-new');
-        const floorEl = r.element.querySelector('.fr .no');
-        if (floorEl) floorEl.title = '未读新回复';
+        // 楼层号节点在解析阶段就拿到了，不必再 querySelector 一遍
+        if (r.floorEl) r.floorEl.title = '未读新回复';
       }
       return newCount;
     }
@@ -1606,9 +1636,20 @@
       if (!bar) {
         bar = document.createElement('div');
         bar.id = 'v2ex-new-count-bar';
+        const dot = document.createElement('span');
+        dot.className = 'ncb-dot';
+        const strong = document.createElement('strong');
+        const text = document.createElement('span');
+        text.append('有 ', strong, ' 条新回复');
+        const hint = document.createElement('span');
+        hint.className = 'ncb-hint';
+        hint.textContent = 'j / k 键跳转';
+        bar.append(dot, text, hint);
+        bar._countEl = strong;
         replyBox.parentNode.insertBefore(bar, replyBox);
       }
-      bar.innerHTML = `<span class="ncb-dot"></span><span>有 <strong>${newCount}</strong> 条新回复</span><span class="ncb-hint">j / k 键跳转</span>`;
+      const countEl = bar._countEl || bar.querySelector('strong');
+      if (countEl) countEl.textContent = String(newCount);
     }
 
     // ── 悬停引用预览（在 B64 完成后运行，延迟 150ms）──
@@ -1922,20 +1963,28 @@
         banner.id = 'v2ex-retry-banner';
         replyBox.parentNode.insertBefore(banner, replyBox);
 
-        function attachRetry(pagesToRetry) {
-          banner.innerHTML = `<span>⚠️ 第 ${pagesToRetry.join('、')} 页加载失败</span><button>重试</button>`;
-          banner.querySelector('button').addEventListener('click', async () => {
-            const btn = banner.querySelector('button');
+        const attachRetry = pagesToRetry => {
+          const text = document.createElement('span');
+          text.textContent = `⚠️ 第 ${pagesToRetry.join('、')} 页加载失败`;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = '重试';
+          banner.replaceChildren(text, btn);
+          btn.addEventListener('click', async () => {
             btn.textContent = '重试中…'; btn.disabled = true;
 
             const results = await fetchPages(pagesToRetry, (completed, total) => {
               btn.textContent = `重试中 ${completed}/${total}…`;
             });
-            const stillFailed = results.filter(result => !result.replies).map(result => result.page);
-            const newReplies = results.filter(result => result.replies).flatMap(result => result.replies);
-            results.filter(result => !result.replies).forEach(result => {
-              log(`Reply page ${result.page} retry failed:`, result.error);
-            });
+            const stillFailed = [];
+            const newReplies = [];
+            for (const result of results) {
+              if (result.replies) newReplies.push(...result.replies);
+              else {
+                stillFailed.push(result.page);
+                log(`Reply page ${result.page} retry failed:`, result.error);
+              }
+            }
 
             if (newReplies.length > 0) {
               allReplies = normalizeReplies([...allReplies, ...newReplies]);
@@ -1955,8 +2004,8 @@
             } else {
               banner.remove();
             }
-          });
-        }
+          }, { once: true });
+        };
         attachRetry([...failedPages]);
       }
 
@@ -2013,11 +2062,12 @@
           }
           if (likes > 0) {
             const content = cell.querySelector('.reply_content');
+            const author = cell.querySelector('strong > a');
             comments.push({
               id: cell.id, likes,
               avatar:      cell.querySelector('img.avatar')?.src || '',
-              username:    cell.querySelector('strong > a')?.textContent?.trim() || 'Unknown',
-              userUrl:     cell.querySelector('strong > a')?.href || '#',
+              username:    author?.textContent?.trim() || 'Unknown',
+              userUrl:     author?.href || '#',
               time:        cell.querySelector('.ago')?.textContent?.trim() || '',
               contentNode: content?.cloneNode(true) || null,
               floor:       cell.querySelector('.no')?.textContent?.trim() || '#',
@@ -2149,19 +2199,39 @@
     const SCROLL_OFFSET_RATIO = CONFIG.nav.scrollOffsetRatio;
     let newReplies = [], curIndex = -1, hudTimer = null, activeReply = null;
 
-    function getHud() {
-      let hud = document.getElementById('v2ex-nav-hud');
-      if (!hud) { hud = document.createElement('div'); hud.id = 'v2ex-nav-hud'; document.body.appendChild(hud); }
-      return hud;
+    // HUD 每次按键都重建 innerHTML 的话，等于每次都重新解析一遍 HTML；
+    // 结构建一次留着，之后只改箭头和计数两处文本。
+    let hud = null;
+    let hudArrow = null;
+    let hudIndex = null;
+    let hudTotal = null;
+    function buildHud() {
+      hud = document.createElement('div');
+      hud.id = 'v2ex-nav-hud';
+      hudArrow = document.createElement('span');
+      hudArrow.className = 'hud-arrow';
+      const label = document.createElement('span');
+      label.className = 'hud-label';
+      label.textContent = 'NEW';
+      const sep = document.createElement('span');
+      sep.className = 'hud-sep';
+      sep.textContent = ' / ';
+      hudIndex = document.createTextNode('');
+      hudTotal = document.createTextNode('');
+      const count = document.createElement('span');
+      count.className = 'hud-count';
+      count.append(hudIndex, sep, hudTotal);
+      const hint = document.createElement('span');
+      hint.className = 'hud-hint';
+      hint.textContent = 'j↓ k↑';
+      hud.append(hudArrow, label, count, hint);
+      document.body.appendChild(hud);
     }
     function showHud(index, total, direction) {
-      const hud = getHud();
-      hud.innerHTML = `
-        <span class="hud-arrow">${direction === 'next' ? '↓' : '↑'}</span>
-        <span class="hud-label">NEW</span>
-        <span class="hud-count">${index + 1}<span class="hud-sep"> / </span>${total}</span>
-        <span class="hud-hint">j↓ k↑</span>
-      `;
+      if (!hud?.isConnected) buildHud();
+      hudArrow.textContent = direction === 'next' ? '↓' : '↑';
+      hudIndex.nodeValue = String(index + 1);
+      hudTotal.nodeValue = String(total);
       hud.classList.add('visible');
       clearTimeout(hudTimer);
       hudTimer = setTimeout(() => hud.classList.remove('visible'), 2200);
@@ -2518,14 +2588,16 @@
     }
 
     // ── 胶囊渲染 ──
-    function lightenHex(hex, amount) {
-      const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-      if (!m) return hex;
-      const n = parseInt(m[1], 16);
-      const mix = c => Math.round(c + (255 - c) * amount);
-      const r = mix((n >> 16) & 255), g = mix((n >> 8) & 255), b = mix(n & 255);
-      return `rgb(${r}, ${g}, ${b})`;
-    }
+    // 配色只有固定 7 种，六个 CSS 变量在启动时算一次拼成 cssText；
+    // 否则每画一个胶囊都要跑 6 次正则解析 + 字符串拼接，一页几百个用户名很可观。
+    const CHIP_CSS = new Map(COLORS.map(({ key, hex }) => [key, [
+      `--v2t-chip-bg:${hexToRgba(hex, 0.13)}`,
+      `--v2t-chip-fg:${hex}`,
+      `--v2t-chip-bd:${hexToRgba(hex, 0.32)}`,
+      `--v2t-chip-bg-n:${hexToRgba(hex, 0.22)}`,
+      `--v2t-chip-fg-n:${lightenHex(hex, 0.38)}`,
+      `--v2t-chip-bd-n:${hexToRgba(hex, 0.45)}`,
+    ].join(';')]));
 
     function userFromLink(anchor) {
       try {
@@ -2539,7 +2611,6 @@
       const user = slot.dataset.user;
       const entry = get(user);
       if (entry) {
-        const hex = COLOR_MAP.get(entry.color) || COLOR_MAP.get(DEFAULT_COLOR);
         const chip = document.createElement('span');
         chip.className = 'v2t-chip';
         chip.textContent = entry.tag;
@@ -2547,12 +2618,7 @@
         chip.title = `${entry.tag} · ${entry.name || user}\n点击编辑标签`;
         chip.setAttribute('role', 'button');
         chip.tabIndex = 0;
-        chip.style.setProperty('--v2t-chip-bg', hexToRgba(hex, 0.13));
-        chip.style.setProperty('--v2t-chip-fg', hex);
-        chip.style.setProperty('--v2t-chip-bd', hexToRgba(hex, 0.32));
-        chip.style.setProperty('--v2t-chip-bg-n', hexToRgba(hex, 0.22));
-        chip.style.setProperty('--v2t-chip-fg-n', lightenHex(hex, 0.38));
-        chip.style.setProperty('--v2t-chip-bd-n', hexToRgba(hex, 0.45));
+        chip.style.cssText = CHIP_CSS.get(entry.color) || CHIP_CSS.get(DEFAULT_COLOR);
         slot.replaceChildren(chip);
         return;
       }
@@ -3064,9 +3130,32 @@
         if (Editor.isOpen() && !e.target.closest?.('.v2t-chip, .v2t-add, #v2t-editor')) Editor.close();
       });
 
-      const rescan = debounce(() => decorate(document), 150);
+      // 只扫新插入的子树，不做全文档 rescan：楼层树一次会搬进上千个节点，
+      // 每批变更都重扫整页的话，光 querySelectorAll 就要走满整棵 DOM。
+      // 用 Set 攒住待扫根节点，防抖后统一处理（同一批里祖先覆盖后代，重复由
+      // attachSlot 的 data-v2t-bound 挡掉）。
+      const pendingRoots = new Set();
+      const flushDecorate = debounce(() => {
+        const roots = [...pendingRoots];
+        pendingRoots.clear();
+        for (const node of roots) {
+          if (node.isConnected) decorate(node);
+        }
+      }, 150);
       const root = document.getElementById('Main') || document.body;
-      new MutationObserver(rescan).observe(root, { childList: true, subtree: true });
+      new MutationObserver(records => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            // 自己插入的槽位和槽位里的胶囊都不必回扫，
+            // 否则每装饰/重绘一个用户名就要多排一轮 decorate
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            if (node.classList.contains('v2t-slot')) continue;
+            if (node.parentElement?.classList.contains('v2t-slot')) continue;
+            pendingRoots.add(node);
+          }
+        }
+        if (pendingRoots.size) flushDecorate();
+      }).observe(root, { childList: true, subtree: true });
 
       // 其它标签页改动标签后同步刷新
       GM.onChange(storeKey, next => {
