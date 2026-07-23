@@ -515,10 +515,12 @@
        悬停才出现——鼠标一进一出，NEW 左右横跳，不悬停时又像悬在空处。
        现在直接把状态画进楼层号本身：它是 .fr 的最后一个元素、右边缘就是
        行的右边缘，按钮显不显示都影响不到它，天然对齐成一列。
-       已读 = 安静的灰数字；未读 = 实心蓝药丸 + 一颗白点。 */
+       已读 = 安静的灰数字；未读 = 同样尺寸的实心蓝药丸。
+       两种状态只换颜色、不换几何：宽高/内边距/字号全一致，
+       否则同一列里未读那几个会明显胖出来。 */
     .reply-wrapper .fr .no {
       display: inline-flex !important; align-items: center; justify-content: center;
-      gap: 4px; box-sizing: border-box;
+      box-sizing: border-box;
       min-width: 24px; height: 17px; padding: 0 6px !important;
       margin-left: 2px;
       font-size: 10px !important; font-weight: 600; line-height: 1 !important;
@@ -548,12 +550,6 @@
       color: #fff !important;
       background: var(--new-accent) !important;
       border-color: transparent;
-      box-shadow: 0 1px 3px rgba(74, 122, 240, 0.35);
-    }
-    .cell.reply-new .fr .no::before {
-      content: ''; flex: 0 0 auto;
-      width: 4px; height: 4px; border-radius: 50%;
-      background: #fff; opacity: 0.92;
     }
     /* 未读药丸已经是实心的，别让上面那条 hover 规则再给它描一圈灰边 */
     .cell.reply-new:hover .fr .no { color: #fff !important; border-color: transparent; }
@@ -788,8 +784,7 @@
     #Wrapper.Night .reply-wrapper > .cell:hover .fr .no {
       color: #9aa1ab !important; border-color: rgba(255, 255, 255, 0.13);
     }
-    #Wrapper.Night .cell.reply-new .fr .no { color: #10131a !important; box-shadow: none; }
-    #Wrapper.Night .cell.reply-new .fr .no::before { background: #10131a; opacity: 0.75; }
+    #Wrapper.Night .cell.reply-new .fr .no { color: #10131a !important; }
     #Wrapper.Night .cell.reply-new:hover .fr .no { color: #10131a !important; border-color: transparent; }
     #Wrapper.Night .reply-collapsed-hint { color: #7b818c; }
     #Wrapper.Night #v2ex-new-count-bar {
