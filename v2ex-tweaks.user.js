@@ -376,15 +376,6 @@
     }
     #v2t-toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
-    #v2t-entry {
-      display: inline-block; margin-left: 8px;
-      padding: 2px 10px; background-color: #f0f2f5; color: #ccc;
-      border-radius: 12px; font-size: 12px; cursor: pointer;
-      transition: all 0.2s ease; line-height: 1.5; border: 1px solid transparent;
-    }
-    #v2t-entry:hover { background-color: #e3e8f0; color: #555; border-color: #ccc; }
-    #Wrapper.Night #v2t-entry { background-color: #2b2e35; color: #6a707c; }
-    #Wrapper.Night #v2t-entry:hover { background-color: #343841; color: #b9bfca; border-color: #4a4e58; }
   `);
 
   if (isTopicPage()) GM_addStyle(`
@@ -2967,26 +2958,9 @@
         Manager.refresh();
       });
 
+      // 管理面板（导入 / 导出 / 批量编辑）是低频操作，入口放在油猴菜单里，
+      // 不在每个主题页的标题旁常驻一个按钮。日常打标签走用户名旁的 + 即可。
       GM.menu('用户标签管理…', () => Manager.open());
-
-      if (isTopicPage()) {
-        const mount = () => {
-          const target = document.querySelector('#Main .header h1') || document.querySelector('#Main .box .header');
-          if (!target || document.getElementById('v2t-entry')) return;
-          const btn = document.createElement('span');
-          btn.id = 'v2t-entry';
-          btn.textContent = '标签';
-          btn.title = '管理用户标签（导入 / 导出）';
-          btn.setAttribute('role', 'button');
-          btn.addEventListener('click', e => {
-            e.preventDefault();
-            e.stopPropagation();
-            Manager.open();
-          });
-          target.appendChild(btn);
-        };
-        setTimeout(mount, 520);
-      }
     }
 
     return { boot, decorate, open: () => Manager.open() };
