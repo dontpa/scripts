@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.0
+// @version      2.5.1
 // @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -1552,16 +1552,19 @@
       container.appendChild(fragment);
     }
 
-    // ── 未读标记：仅在所有分页成功后推进阅读进度 ──
+    // ── 未读标记 ──
+    // 阅读进度走 GM 存储而不是 localStorage：脚本 @match 了 v2ex.com /
+    // www.v2ex.com / edge.v2ex.com 三个 origin，localStorage 按 origin 隔离，
+    // 换个域名进同一个帖子就会被当成没读过。
     function createReadState(topicId) {
       const key = `${CONFIG.threadTree.readKeyPrefix}${topicId}`;
-      try {
-        const stored = localStorage.getItem(key);
-        return { key, firstVisit: stored === null, lastReadFloor: Number.parseInt(stored || '0', 10) || 0 };
-      } catch (err) {
-        log('Read state error:', err);
-        return { key, firstVisit: true, lastReadFloor: 0, disabled: true };
-      }
+      const stored = GM.get(key, null);
+      return {
+        key,
+        // null = 真的没进过。首次访问不标记，否则满屏都是"新回复"。
+        firstVisit: stored === null,
+        lastReadFloor: Number.isSafeInteger(stored) ? stored : 0,
+      };
     }
 
     function markUnread(state, replies) {
@@ -1579,12 +1582,19 @@
       return newCount;
     }
 
+    // 只推进到"从 1 楼起连续加载成功"的那个楼层，而不是见到的最大楼层：
+    // 中间某页抓失败时，它后面的页照样会带来更大的楼层号，直接存 max 会把
+    // 失败页里那几十楼永久标成已读。取连续前缀就能带着缺口安全地存进度，
+    // 不必像以前那样"只要有一页失败就整个不写"——那会让这个帖子永远停在
+    // firstVisit，之后的新回复一条都标不出来。
     function commitReadState(state, replies) {
-      if (state.disabled) return;
-      let maxFloor = 0;
-      for (const r of replies) if (r.floorNum > maxFloor) maxFloor = r.floorNum;
-      try { localStorage.setItem(state.key, String(maxFloor)); }
-      catch (err) { log('Read state error:', err); }
+      const floors = new Set();
+      for (const r of replies) floors.add(r.floorNum);
+      let contiguous = 0;
+      while (floors.has(contiguous + 1)) contiguous++;
+      // 进度只前进不后退；firstVisit 时哪怕是 0 也要落一笔，把"没进过"翻成"进过"
+      if (!state.firstVisit && contiguous <= state.lastReadFloor) return;
+      GM.set(state.key, contiguous);
     }
 
     function updateNewCountBar(replyBox, newCount) {
@@ -1853,6 +1863,11 @@
 
       const replyBox = Array.from(document.querySelectorAll('.box')).find(b => b.querySelector('div[id^="r_"]'));
       if (!replyBox) {
+        // 帖子此刻还没有回复也要落一条进度：不然下次进来 stored 仍是 null、
+        // 被当成首次访问，期间攒下的新回复一条都不会被标记。
+        // （从首页点进刚发出来的新帖，就是这条路径。）
+        const emptyState = createReadState(topicId);
+        if (emptyState.firstVisit) commitReadState(emptyState, []);
         log('楼层树：没找到回复容器（.box 内无 div[id^="r_"]），已跳过');
         return;
       }
@@ -1893,7 +1908,7 @@
         + `嵌套 ${replyBox.querySelectorAll('.reply-children').length} 组，未读 ${newCount} 条`);
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
       updateNewCountBar(replyBox, newCount);
-      if (!failedPages.length) commitReadState(readState, allReplies);
+      commitReadState(readState, allReplies);
 
       let hoverTimer = null;
       const scheduleHoverPreview = () => {
@@ -1929,6 +1944,9 @@
               renderTree(allReplies, maps, replyBox, topicId);
               UserTags.decorate(replyBox);
               updateNewCountBar(replyBox, newCount);
+              // 补回来的页可能填上了缺口，让连续前缀继续往前走；
+              // 哪怕还有别的页没救回来，这一段进度也该存下
+              commitReadState(readState, allReplies);
               scheduleHoverPreview();
             }
 
@@ -1936,7 +1954,6 @@
               attachRetry(stillFailed); // 仍有失败页 → 重新挂载按钮
             } else {
               banner.remove();
-              commitReadState(readState, allReplies);
             }
           });
         }
