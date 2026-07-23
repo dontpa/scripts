@@ -1373,6 +1373,11 @@
       const newSlot = document.createElement('span');
       newSlot.className = 'rh-new';
 
+      // 先把空的 head 挂进文档，再往里搬节点。反过来做的话，一旦中途抛异常，
+      // 用户名/时间/NEW 会跟着游离的 head 一起从页面上消失。
+      container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
+      head.append(identity, meta, gap);
+
       const likes = [];
       const times = [];
       const badges = [];
@@ -1394,21 +1399,22 @@
       // 时间在前、♥ 在后，保持 V2EX 原本的阅读顺序
       meta.append(...times, ...likes);
       newSlot.append(...badges);
-      head.append(identity, meta, gap);
 
       const floor = container.querySelector(':scope > .fr');
-      if (floor) {
-        // NEW 插在楼层块里、第一个可见操作（感谢/回复按钮）之前。
-        // 用"第一个 a/img/.no"定位而不是插到最前面：.fr 前部可能有
-        // 空白或隐藏节点，插在那里会让 NEW 离按钮很远。
-        const firstAction = floor.querySelector('a, img, .no');
-        floor.insertBefore(newSlot, firstAction || floor.firstChild);
-        head.appendChild(floor);
-      } else {
+      if (!floor) {
         head.appendChild(newSlot);   // 没有楼层块时退到行尾
+        return;
       }
 
-      container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
+      // NEW 插在楼层块里、第一个可见操作（感谢/回复按钮）之前。
+      // 用"第一个 a/img/.no"定位而不是插到最前面：.fr 前部可能有空白或隐藏节点。
+      // 注意 querySelector 命中的可能是孙子节点——登录后"感谢"按钮就包在
+      // <div class="thank_area"> 里——而 insertBefore 只接受直接子节点，
+      // 所以要沿 parentElement 回溯到 .fr 的直接子节点为止。
+      let ref = floor.querySelector('a, img, .no');
+      while (ref && ref.parentElement !== floor) ref = ref.parentElement;
+      floor.insertBefore(newSlot, ref || floor.firstChild);
+      head.appendChild(floor);
     }
 
     // .fr 里的操作按钮各行不一定一样多——自己的回复没有"感谢"按钮，已感谢过的
