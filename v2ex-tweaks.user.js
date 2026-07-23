@@ -181,7 +181,10 @@
       --v2t-text-dim: #8a94a6;
       --v2t-border: #e6e9f0;
       --v2t-shadow: 0 12px 40px rgba(18, 24, 40, 0.16);
-      --v2t-accent: #4a7af0;
+      /* 标签体系专用主色（紫）。刻意避开脚本里代表"系统状态"的蓝
+         （NEW / 引用 / b64 / 新回复计数条），两者不该被看成同一类东西。 */
+      --v2t-accent: #8b45c9;
+      --v2t-accent-soft: rgba(139, 69, 201, 0.15);
     }
     #Wrapper.Night {
       --v2t-surface: #23252b;
@@ -190,19 +193,27 @@
       --v2t-text-dim: #8b93a3;
       --v2t-border: #3a3d45;
       --v2t-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+      --v2t-accent: #c084e8;
+      --v2t-accent-soft: rgba(192, 132, 232, 0.2);
     }
 
-    /* ── 胶囊 ── */
+    /* ── 胶囊 ──
+       圆角药丸 + 前导圆点，形状上就区别于方形实心的 NEW 徽标 */
     .v2t-slot { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; margin-left: 6px; }
     .v2t-chip {
       display: inline-flex; align-items: center; max-width: 160px;
-      padding: 0 6px; height: 16px; line-height: 16px;
+      padding: 0 8px 0 6px; height: 17px; line-height: 17px;
       font-size: 11px; font-weight: 600; font-family: var(--v2t-font);
       letter-spacing: 0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      border-radius: 4px; cursor: pointer; user-select: none;
+      border-radius: 9px; cursor: pointer; user-select: none;
       background: var(--v2t-chip-bg); color: var(--v2t-chip-fg);
       border: 1px solid var(--v2t-chip-bd);
       transition: filter 0.12s, transform 0.12s;
+    }
+    .v2t-chip::before {
+      content: ''; flex: none;
+      width: 4px; height: 4px; margin-right: 5px;
+      border-radius: 50%; background: currentColor; opacity: 0.8;
     }
     .v2t-chip:hover { filter: brightness(0.94); }
     .v2t-chip:active { transform: scale(0.96); }
@@ -248,9 +259,19 @@
     }
     #v2t-editor input[type="text"]:focus {
       border-color: var(--v2t-accent);
-      box-shadow: 0 0 0 3px rgba(74, 122, 240, 0.14);
+      box-shadow: 0 0 0 3px var(--v2t-accent-soft);
     }
-    #v2t-editor .v2t-swatches { display: flex; gap: 6px; margin: 10px 0 2px; }
+    /* 配色默认收起：常规流程是"输入 → 回车"，不必先挑颜色 */
+    #v2t-editor .v2t-color-toggle {
+      display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
+      font-size: 11px; color: var(--v2t-text-dim); cursor: pointer; user-select: none;
+    }
+    #v2t-editor .v2t-color-toggle:hover { color: var(--v2t-accent); }
+    #v2t-editor .v2t-color-toggle .v2t-color-preview {
+      width: 10px; height: 10px; border-radius: 50%; flex: none;
+    }
+    #v2t-editor .v2t-swatches { display: none; gap: 6px; margin: 8px 0 2px; }
+    #v2t-editor .v2t-swatches.open { display: flex; }
     #v2t-editor .v2t-swatch {
       width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
       border: 2px solid transparent; background-clip: padding-box;
@@ -440,14 +461,17 @@
       0%   { background-color: rgba(74,122,240,0.18); }
       100% { background-color: transparent; }
     }
+    /* NEW 是"这条回复的状态"，不是"这个人的属性"：
+       方角 + 实心蓝，和圆角描边的紫色标签胶囊在形状与颜色上都拉开距离；
+       位置也跟在时间戳后面，归入回复元信息一组，而不是贴着用户名。 */
     .new-badge {
       display: inline-block;
       font-size: 9px; font-weight: 700;
-      color: var(--new-accent); background: transparent;
-      border: 1px solid rgba(74,122,240,0.45); border-radius: 3px;
-      padding: 0 3px; line-height: 14px; height: 14px;
-      margin-left: 5px; margin-right: 2px;
-      vertical-align: middle; letter-spacing: 0.5px;
+      color: #fff; background: var(--new-accent);
+      border-radius: 2px;
+      padding: 0 4px; line-height: 13px; height: 13px;
+      margin-left: 6px;
+      vertical-align: middle; letter-spacing: 0.6px;
       position: relative; top: -1px;
     }
 
@@ -1323,11 +1347,12 @@
         if (r.floorNum <= state.lastReadFloor) continue;
         newCount++;
         r.element.classList.add('reply-new');
-        const strongEl = r.element.querySelector('strong');
-        if (strongEl && !r.element.querySelector('.new-badge')) {
+        // 优先挂在时间戳后面（回复元信息一组），退回到用户名后面只是兜底
+        const anchor = r.element.querySelector('.ago') || r.element.querySelector('strong');
+        if (anchor && !r.element.querySelector('.new-badge')) {
           const badge = document.createElement('span');
           badge.className = 'new-badge'; badge.textContent = 'NEW'; badge.title = '未读新回复';
-          strongEl.insertAdjacentElement('afterend', badge);
+          anchor.insertAdjacentElement('afterend', badge);
         }
       }
       return newCount;
@@ -2004,18 +2029,20 @@
   const UserTags = (() => {
     const { storeKey, maxTagLength, tombstoneTtlMs, exportVersion } = CONFIG.tags;
 
+    // 主色（紫）排第一并作为默认值：不选颜色也能得到一致好看的标签。
+    // 整套配色刻意不含 #4a7af0 —— 那是 NEW / 引用 / b64 的系统蓝，
+    // 允许用户选到它就等于允许把"人的标签"伪装成"系统状态"。
     const COLORS = [
-      { key: 'blue',   hex: '#4a7af0' },
-      { key: 'green',  hex: '#2f9e5e' },
-      { key: 'orange', hex: '#e08b26' },
-      { key: 'red',    hex: '#e0483a' },
-      { key: 'purple', hex: '#8b5cf6' },
-      { key: 'teal',   hex: '#0f9b9b' },
-      { key: 'pink',   hex: '#db2f92' },
-      { key: 'gray',   hex: '#78808f' },
+      { key: 'violet', hex: '#8b45c9', label: '默认紫' },
+      { key: 'teal',   hex: '#0e8f8f', label: '青' },
+      { key: 'green',  hex: '#2f8f4e', label: '绿' },
+      { key: 'amber',  hex: '#b5730b', label: '琥珀' },
+      { key: 'red',    hex: '#cf3b30', label: '红' },
+      { key: 'pink',   hex: '#c72d78', label: '粉' },
+      { key: 'slate',  hex: '#5f6b7a', label: '灰蓝' },
     ];
     const COLOR_MAP = new Map(COLORS.map(c => [c.key, c.hex]));
-    const DEFAULT_COLOR = 'blue';
+    const DEFAULT_COLOR = 'violet';
 
     // 会员链接出现的三处位置：回复楼层、主题头部作者、高赞阅览室卡片
     const AUTHOR_SELECTOR = [
@@ -2383,26 +2410,52 @@
         input.value = existing?.tag || '';
         input.setAttribute('aria-label', `${user} 的标签`);
 
+        // 配色是可选项：默认收起，只有在改过颜色的标签上才自动展开
+        const toggle = document.createElement('div');
+        toggle.className = 'v2t-color-toggle';
+        toggle.setAttribute('role', 'button');
+        const preview = document.createElement('span');
+        preview.className = 'v2t-color-preview';
+        const toggleText = document.createElement('span');
+        toggle.append(preview, toggleText);
+
         const swatches = document.createElement('div');
         swatches.className = 'v2t-swatches';
-        for (const { key, hex } of COLORS) {
+
+        const syncColor = () => {
+          const hex = COLOR_MAP.get(currentColor) || COLOR_MAP.get(DEFAULT_COLOR);
+          preview.style.background = hex;
+          const name = COLORS.find(c => c.key === currentColor)?.label || '';
+          toggleText.textContent = swatches.classList.contains('open') ? '收起配色' : `配色：${name}`;
+        };
+
+        for (const { key, hex, label } of COLORS) {
           const dot = document.createElement('span');
           dot.className = 'v2t-swatch' + (key === currentColor ? ' selected' : '');
           dot.style.background = hex;
           dot.style.color = hex;
-          dot.title = key;
+          dot.title = label;
           dot.setAttribute('role', 'button');
-          dot.setAttribute('aria-label', `颜色 ${key}`);
+          dot.setAttribute('aria-label', `颜色 ${label}`);
           dot.addEventListener('click', () => {
             currentColor = key;
             swatches.querySelectorAll('.v2t-swatch').forEach(s => s.classList.remove('selected'));
             dot.classList.add('selected');
+            syncColor();
             input.focus();
           });
           swatches.appendChild(dot);
         }
 
-        el.append(head, input, swatches);
+        toggle.addEventListener('click', () => {
+          swatches.classList.toggle('open');
+          syncColor();
+          place();
+        });
+        if (existing && existing.color !== DEFAULT_COLOR) swatches.classList.add('open');
+        syncColor();
+
+        el.append(head, input, toggle, swatches);
 
         const recent = suggestions().filter(item => item.tag !== input.value);
         if (recent.length) {
