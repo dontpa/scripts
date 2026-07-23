@@ -252,6 +252,15 @@
     .v2t-add:focus-visible,
     .cell:hover .v2t-add, .hot-card:hover .v2t-add, .header:hover .v2t-add { opacity: 1; pointer-events: auto; }
     .v2t-add:hover { color: var(--v2t-accent); border-color: var(--v2t-accent); }
+    /* 列表页的 .topic_info 只是一行 12px 小字，楼层里那颗 17px 的胶囊会把
+       整行撑高、几十条主题叠起来很明显。这里整体缩一档，不改变形状语言。 */
+    .topic_info .v2t-slot { margin-left: 5px; gap: 3px; }
+    .topic_info .v2t-chip {
+      height: 15px; line-height: 15px; font-size: 10px;
+      padding: 0 7px 0 5px; border-radius: 8px; max-width: 120px;
+    }
+    .topic_info .v2t-chip::before { width: 3px; height: 3px; margin-right: 4px; }
+    .topic_info .v2t-add { width: 13px; height: 13px; font-size: 11px; border-radius: 3px; }
 
     /* ── 编辑气泡 ── */
     #v2t-editor {
@@ -2261,11 +2270,15 @@
     const COLOR_MAP = new Map(COLORS.map(c => [c.key, c.hex]));
     const DEFAULT_COLOR = 'violet';
 
-    // 会员链接出现的三处位置：回复楼层、主题头部作者、高赞阅览室卡片
+    // 会员链接出现的位置。.topic_info 那条覆盖所有主题列表页——首页、节点页、
+    // /recent、/my/topics、个人主页——里面的作者和"最后回复来自"两个用户名；
+    // 它只出现在列表项里，所以不会误伤主题页。限定 strong > a 是为了跳过
+    // 同一行里那个只包着头像的 <a href="/member/x">，否则会往头像后面塞胶囊。
     const AUTHOR_SELECTOR = [
-      'div.cell[id^="r_"] strong > a[href*="/member/"]',
-      '#Main .header small.gray > a[href*="/member/"]',
-      '.hot-card a.user-name',
+      'div.cell[id^="r_"] strong > a[href*="/member/"]',   // 回复楼层
+      '#Main .header small.gray > a[href*="/member/"]',    // 主题头部作者
+      '.topic_info strong > a[href*="/member/"]',          // 主题列表：作者 / 最后回复
+      '.hot-card a.user-name',                             // 高赞阅览室卡片
     ].join(',');
 
     // ── 存储层 ──
