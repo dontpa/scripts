@@ -451,14 +451,20 @@
     .reply_content { font-size: 14px; line-height: 1.5; margin-top: 2px; }
     .ago, .no, .fade { font-size: 11px !important; }
 
-    /* ===== 回复头部：身份靠左，元信息靠右 =====
-       左边是"这个人"（用户名 + 标签），右边是"这条回复"（♥ / 时间 / NEW / 楼层）。
-       右侧最后两格宽度固定，于是不管用户名多长、时间多长、是否未读，
-       时间的右边缘和 NEW 都落在同一条竖直基线上。 */
-    .v2-reply-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    /* ===== 回复头部：定宽身份列 + 紧随其后的元信息 =====
+       身份列（用户名 + 标签）宽度固定，NEW 贴在这一列的右边缘，
+       于是不管用户名多长，NEW 和时间都从同一条竖直基线开始。
+       楼层块 .fr 用 margin-left:auto 顶到最右，它内部宽度多少都不影响左侧的列。 */
+    .v2-reply-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    /* 列宽由 JS 按本帖最长的"用户名 + 标签"实测得出（--rh-id-w），
+       既不截断用户名，也不会留下一大片空白 */
     .v2-reply-head .rh-id {
       display: flex; align-items: center; gap: 4px;
-      flex: 0 1 auto; min-width: 0;
+      flex: 0 0 var(--rh-id-w, 170px); max-width: 46%; min-width: 0;
+    }
+    /* 测量态：临时解除约束，让 JS 读到未被压缩的自然宽度 */
+    .rh-measuring .v2-reply-head .rh-id {
+      flex: 0 0 auto !important; width: max-content !important; max-width: none !important;
     }
     .v2-reply-head .rh-id > strong {
       display: inline-flex; align-items: center;
@@ -469,20 +475,19 @@
       min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .v2-reply-head .rh-id .v2t-slot { flex: 0 0 auto; }
-    /* 弹性留白：吸收所有富余宽度，把右侧元信息推到固定位置 */
-    .v2-reply-head .rh-gap { flex: 1 1 auto; min-width: 6px; }
+    /* 头部里的胶囊收窄一些，避免一个超长标签把整列撑开 */
+    .v2-reply-head .rh-id .v2t-chip { max-width: 104px; }
+    /* NEW 右对齐到身份列末尾：已读行这里为空但列宽不变，时间不会左右横跳 */
+    .v2-reply-head .rh-new { flex: 0 0 auto; margin-left: auto; padding-left: 6px; }
+    .v2-reply-head .rh-new .new-badge { margin-left: 0; }
     .v2-reply-head .rh-meta {
       display: flex; align-items: center; gap: 8px;
-      flex: 0 0 auto; white-space: nowrap;
+      flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden;
     }
-    /* NEW 的槽位在每条回复上都存在（未读时才填内容），
-       否则已读/未读两种行的时间会差一个徽标的宽度，列就歪了 */
-    .v2-reply-head .rh-new { flex: 0 0 30px; text-align: right; }
-    .v2-reply-head .rh-new .new-badge { margin-left: 0; }
     .v2-reply-head > .fr {
       float: none !important;
-      display: inline-flex; align-items: center; justify-content: flex-end;
-      flex: 0 0 auto; min-width: 42px; margin: 0 !important;
+      display: inline-flex; align-items: center;
+      flex: 0 0 auto; margin: 0 0 0 auto !important;
     }
 
     .reply-new > .cell {
@@ -501,7 +506,7 @@
     .new-badge {
       display: inline-block;
       font-size: 9px; font-weight: 700;
-      color: #fff; background: var(--new-accent);
+      color: var(--new-accent); background: var(--new-accent-soft);
       border-radius: 2px;
       padding: 0 4px; line-height: 13px; height: 13px;
       margin-left: 6px;
@@ -1283,8 +1288,9 @@
     // ── 头部重排 ──
     // V2EX 原始结构是一串行内节点（楼层浮动在右，用户名/时间/♥ 顺序排开），
     // 用户名长度不同就会让时间和 NEW 各排各的。这里把它整理成一个 flex 行：
-    // [用户名 + 标签] ——弹性留白—— [♥] [时间] [NEW 槽位] [楼层]
-    // 右侧两格宽度固定，时间因此右对齐到同一条基线。
+    // [用户名 + 标签 ……… NEW]  [时间 ♥]  ——顶到最右—— [楼层]
+    //  └─ 定宽身份列 ─┘
+    // 身份列定宽，所以 NEW 和时间的起点在每一行都一样。
     // 结构不符合预期时直接返回，保持 V2EX 原样，不做半吊子改动。
     function layoutReplyHeader(cell) {
       const strong = cell.querySelector('strong');
@@ -1305,14 +1311,11 @@
       head.className = 'v2-reply-head';
       const identity = document.createElement('span');
       identity.className = 'rh-id';
-      const gap = document.createElement('span');
-      gap.className = 'rh-gap';
       const meta = document.createElement('span');
       meta.className = 'rh-meta';
       const newSlot = document.createElement('span');
       newSlot.className = 'rh-new';
 
-      // ♥ 必须排在时间左边：时间右侧只能是定宽格子，否则右边缘又会浮动
       const likes = [];
       const times = [];
       const badges = [];
@@ -1331,14 +1334,36 @@
         else identity.appendChild(node);   // strong / badges / 未知元素一律留在左侧
       }
 
-      meta.append(...likes, ...times);
+      // 时间在前、♥ 在后，保持 V2EX 原本的阅读顺序
+      meta.append(...times, ...likes);
       newSlot.append(...badges);
-      head.append(identity, gap, meta, newSlot);
+      // NEW 槽位放在身份列末尾，靠 margin-left:auto 贴到该列右边缘
+      identity.appendChild(newSlot);
+      head.append(identity, meta);
 
       const floor = container.querySelector(':scope > .fr');
       if (floor) head.appendChild(floor);
 
       container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
+    }
+
+    // 按本帖实际内容确定身份列宽度：取最长的"用户名 + 标签"，夹在合理区间内。
+    // 用固定值的话，短名字会留下一片空白，长名字又会被省略号截断——而用户名不该被截断。
+    // 测量在 a 上取 scrollWidth（不受 ellipsis 影响），胶囊 flex 不收缩所以 offsetWidth 即真实宽度。
+    function syncIdentityColumn(container) {
+      const ids = container.querySelectorAll('.v2-reply-head > .rh-id');
+      if (!ids.length) return;
+      // 加测量态临时解除列宽约束，直接读每行的自然宽度——
+      // 这样 gap / margin / NEW 徽标都被算进去了，不用手工凑常数。
+      container.classList.add('rh-measuring');
+      let widest = 0;
+      for (const id of ids) {
+        const width = id.getBoundingClientRect().width;
+        if (width > widest) widest = width;
+      }
+      container.classList.remove('rh-measuring');
+      if (!widest) return;
+      container.style.setProperty('--rh-id-w', `${Math.min(Math.max(Math.ceil(widest), 120), 300)}px`);
     }
 
     // ── 渲染树 ──
@@ -1761,6 +1786,9 @@
       let newCount = markUnread(readState, allReplies);
       renderTree(allReplies, maps, replyBox, topicId);
       UserTags.decorate(replyBox);
+      syncIdentityColumn(replyBox);
+      // 增删标签会改变最长那一项，列宽要跟着重算
+      document.addEventListener('v2ex-tags-updated', () => syncIdentityColumn(replyBox));
 
       loadingBar.remove();
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
@@ -1800,6 +1828,7 @@
               newCount = markUnread(readState, allReplies);
               renderTree(allReplies, maps, replyBox, topicId);
               UserTags.decorate(replyBox);
+              syncIdentityColumn(replyBox);
               updateNewCountBar(replyBox, newCount);
               scheduleHoverPreview();
             }
@@ -2205,6 +2234,8 @@
       GM.set(storeKey, next);
       repaintAll();
       Manager.refresh();
+      // 通知楼层树重算身份列宽度（标签变了，最长的那一项可能也变了）
+      document.dispatchEvent(new CustomEvent('v2ex-tags-updated'));
     }
 
     const get = name => load().tags[keyOf(name)] || null;
@@ -2394,7 +2425,8 @@
         const chip = document.createElement('span');
         chip.className = 'v2t-chip';
         chip.textContent = entry.tag;
-        chip.title = `${entry.name || user} · 点击编辑标签`;
+        // 标签在楼层头部可能被省略号截断，完整文案放进 title 兜底
+        chip.title = `${entry.tag} · ${entry.name || user}\n点击编辑标签`;
         chip.setAttribute('role', 'button');
         chip.tabIndex = 0;
         chip.style.setProperty('--v2t-chip-bg', hexToRgba(hex, 0.13));
