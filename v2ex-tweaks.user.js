@@ -451,6 +451,40 @@
     .reply_content { font-size: 14px; line-height: 1.5; margin-top: 2px; }
     .ago, .no, .fade { font-size: 11px !important; }
 
+    /* ===== 回复头部：身份靠左，元信息靠右 =====
+       左边是"这个人"（用户名 + 标签），右边是"这条回复"（♥ / 时间 / NEW / 楼层）。
+       右侧最后两格宽度固定，于是不管用户名多长、时间多长、是否未读，
+       时间的右边缘和 NEW 都落在同一条竖直基线上。 */
+    .v2-reply-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .v2-reply-head .rh-id {
+      display: flex; align-items: center; gap: 4px;
+      flex: 0 1 auto; min-width: 0;
+    }
+    .v2-reply-head .rh-id > strong {
+      display: inline-flex; align-items: center;
+      flex: 0 1 auto; min-width: 0;
+    }
+    /* 只让用户名本身省略号截断，标签胶囊永远完整显示 */
+    .v2-reply-head .rh-id > strong > a {
+      min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .v2-reply-head .rh-id .v2t-slot { flex: 0 0 auto; }
+    /* 弹性留白：吸收所有富余宽度，把右侧元信息推到固定位置 */
+    .v2-reply-head .rh-gap { flex: 1 1 auto; min-width: 6px; }
+    .v2-reply-head .rh-meta {
+      display: flex; align-items: center; gap: 8px;
+      flex: 0 0 auto; white-space: nowrap;
+    }
+    /* NEW 的槽位在每条回复上都存在（未读时才填内容），
+       否则已读/未读两种行的时间会差一个徽标的宽度，列就歪了 */
+    .v2-reply-head .rh-new { flex: 0 0 30px; text-align: right; }
+    .v2-reply-head .rh-new .new-badge { margin-left: 0; }
+    .v2-reply-head > .fr {
+      float: none !important;
+      display: inline-flex; align-items: center; justify-content: flex-end;
+      flex: 0 0 auto; min-width: 42px; margin: 0 !important;
+    }
+
     .reply-new > .cell {
       background: linear-gradient(90deg, rgba(74,122,240,0.10) 0%, rgba(74,122,240,0.04) 50%, transparent 100%) !important;
       border-left: 3px solid #4a7af0 !important;
@@ -1246,6 +1280,67 @@
       if (state) saveCollapsedSet(state.topicId, state.collapsedSet);
     }
 
+    // ── 头部重排 ──
+    // V2EX 原始结构是一串行内节点（楼层浮动在右，用户名/时间/♥ 顺序排开），
+    // 用户名长度不同就会让时间和 NEW 各排各的。这里把它整理成一个 flex 行：
+    // [用户名 + 标签] ——弹性留白—— [♥] [时间] [NEW 槽位] [楼层]
+    // 右侧两格宽度固定，时间因此右对齐到同一条基线。
+    // 结构不符合预期时直接返回，保持 V2EX 原样，不做半吊子改动。
+    function layoutReplyHeader(cell) {
+      const strong = cell.querySelector('strong');
+      const container = strong?.parentElement;
+      if (!container || container.querySelector(':scope > .v2-reply-head')) return;
+      const content = container.querySelector(':scope > .reply_content');
+      if (!content) return;
+
+      // 收集 strong 到正文之间的头部节点（.sep5 之前）
+      const nodes = [];
+      for (let node = strong; node && node !== content; node = node.nextSibling) {
+        if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('sep5')) break;
+        nodes.push(node);
+      }
+      if (!nodes.length) return;
+
+      const head = document.createElement('div');
+      head.className = 'v2-reply-head';
+      const identity = document.createElement('span');
+      identity.className = 'rh-id';
+      const gap = document.createElement('span');
+      gap.className = 'rh-gap';
+      const meta = document.createElement('span');
+      meta.className = 'rh-meta';
+      const newSlot = document.createElement('span');
+      newSlot.className = 'rh-new';
+
+      // ♥ 必须排在时间左边：时间右侧只能是定宽格子，否则右边缘又会浮动
+      const likes = [];
+      const times = [];
+      const badges = [];
+      for (const node of nodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          // 原来的 &nbsp; 间隔交给 flex gap，非空文本保留在左侧
+          if (node.nodeValue.trim()) identity.appendChild(node);
+          else node.remove();
+          continue;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) { node.remove(); continue; }
+        const cls = node.classList;
+        if (cls.contains('ago')) times.push(node);
+        else if (cls.contains('new-badge')) badges.push(node);
+        else if (cls.contains('small') && cls.contains('fade')) likes.push(node);
+        else identity.appendChild(node);   // strong / badges / 未知元素一律留在左侧
+      }
+
+      meta.append(...likes, ...times);
+      newSlot.append(...badges);
+      head.append(identity, gap, meta, newSlot);
+
+      const floor = container.querySelector(':scope > .fr');
+      if (floor) head.appendChild(floor);
+
+      container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
+    }
+
     // ── 渲染树 ──
     function renderTree(flatReplies, maps, container, topicId) {
       const roots = [];
@@ -1300,6 +1395,7 @@
         wrapper.className = 'reply-wrapper';
         wrapper.dataset.replyId = reply.id;
         reply.element.classList.remove('inner');
+        layoutReplyHeader(reply.element);
         wrapper.appendChild(reply.element);
 
         if (reply.children.length > 0) {
@@ -1347,13 +1443,15 @@
         if (r.floorNum <= state.lastReadFloor) continue;
         newCount++;
         r.element.classList.add('reply-new');
-        // 优先挂在时间戳后面（回复元信息一组），退回到用户名后面只是兜底
+        if (r.element.querySelector('.new-badge')) continue;
+        const badge = document.createElement('span');
+        badge.className = 'new-badge'; badge.textContent = 'NEW'; badge.title = '未读新回复';
+        // 头部已重排时放进预留槽位（对齐成一列）；
+        // 否则退回到时间戳后面，跟回复元信息待在一起
+        const slot = r.element.querySelector('.rh-new');
+        if (slot) { slot.appendChild(badge); continue; }
         const anchor = r.element.querySelector('.ago') || r.element.querySelector('strong');
-        if (anchor && !r.element.querySelector('.new-badge')) {
-          const badge = document.createElement('span');
-          badge.className = 'new-badge'; badge.textContent = 'NEW'; badge.title = '未读新回复';
-          anchor.insertAdjacentElement('afterend', badge);
-        }
+        anchor?.insertAdjacentElement('afterend', badge);
       }
       return newCount;
     }
