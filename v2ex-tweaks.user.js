@@ -217,7 +217,8 @@
     }
 
     /* ── 胶囊 ──
-       圆角药丸 + 前导圆点，形状上就区别于方形实心的 NEW 徽标 */
+       圆角药丸 + 前导圆点。同为药丸形的还有右端的楼层号，但一紫一蓝、
+       一个贴用户名一个贴行右缘，位置和颜色都分得开 */
     .v2t-slot { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; margin-left: 6px; }
     .v2t-chip {
       display: inline-flex; align-items: center; max-width: 160px;
@@ -406,8 +407,6 @@
       --line-hover: #7fa0f5;
       --bg-hover: #fafbff;
       --new-accent: #4a7af0;
-      --new-accent-soft: rgba(74, 122, 240, 0.08);
-      --bg-new: #edf2ff;
     }
 
     .box { padding-bottom: 0 !important; }
@@ -479,14 +478,12 @@
       border-radius: 4px; margin: 0 auto;
     }
     .reply_content { font-size: 14px; line-height: 1.5; margin-top: 2px; }
-    .ago, .no, .fade { font-size: 11px !important; }
+    .ago, .fade { font-size: 11px !important; }
 
     /* ===== 回复头部 =====
        时间保持 V2EX 原来的位置——紧跟用户名，宽度随内容，不占定宽列。
-       NEW 则单独占最右边一格定宽槽位，排在楼层块之后：
-       [用户名 ●标签] [时间 ♥95] ——弹性留白—— [♥ ↩ #46] [NEW]
-       右边缘是每行都一样的（缩进只影响左边），所以 NEW 天然对齐成一列，
-       且完全不受用户名长度、时间长短、♥ 是否出现、楼层几位数的影响。 */
+       [用户名 ●标签] [时间 ♥95] ——弹性留白—— [♥ ↩] [19]
+       弹性留白吃掉所有宽度差，右端那组按钮 + 楼层号整体贴住行右边缘。 */
     .v2-reply-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
     .v2-reply-head .rh-id {
       display: flex; align-items: center; gap: 4px;
@@ -513,19 +510,33 @@
       display: inline-flex; align-items: center;
       flex: 0 0 auto; margin: 0 !important;
     }
-    /* NEW 就放在这一组按钮的左边。已读行槽位为空、不占宽度，
-       按钮和楼层号始终贴右边缘，所以两种行的右侧仍然对齐。 */
-    .v2-reply-head .fr .rh-new { flex: 0 0 auto; display: inline-flex; align-items: center; }
-    .v2-reply-head .fr .rh-new:not(:empty) { margin-right: 8px; }
-    .v2-reply-head .fr .new-badge { margin-left: 0; }
-    /* 楼层号等宽：否则 #3 和 #1234 会让左边的 NEW 左右横跳 */
-    .v2-reply-head .fr .no {
-      display: inline-block; min-width: 30px; text-align: center;
+    /* ── 楼层号 = 未读指示器 ──
+       原来 NEW 是独立徽标，排在 .fr 里那组操作按钮的左边，而"感谢"按钮
+       悬停才出现——鼠标一进一出，NEW 左右横跳，不悬停时又像悬在空处。
+       现在直接把状态画进楼层号本身：它是 .fr 的最后一个元素、右边缘就是
+       行的右边缘，按钮显不显示都影响不到它，天然对齐成一列。
+       已读 = 安静的灰数字；未读 = 实心蓝药丸 + 一颗白点。 */
+    .reply-wrapper .fr .no {
+      display: inline-flex !important; align-items: center; justify-content: center;
+      gap: 4px; box-sizing: border-box;
+      min-width: 24px; height: 17px; padding: 0 6px !important;
+      margin-left: 2px;
+      font-size: 10px !important; font-weight: 600; line-height: 1 !important;
+      font-variant-numeric: tabular-nums; letter-spacing: 0.3px;
+      color: #b9bdc4 !important; background: transparent !important;
+      border: 1px solid transparent; border-radius: 9px !important;
+      transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+    }
+    /* 悬停整行时轻轻浮出来，方便定位/复制楼层号 */
+    .reply-wrapper > .cell:hover .fr .no {
+      color: #8b9098 !important; border-color: rgba(0, 0, 0, 0.09);
     }
 
-    .reply-new > .cell {
-      background: linear-gradient(90deg, rgba(74,122,240,0.10) 0%, rgba(74,122,240,0.04) 50%, transparent 100%) !important;
-      border-left: 3px solid #4a7af0 !important;
+    /* 只压 background-image，不动 background-color：
+       hover 的底色和下面那段 flash 动画才不会被 !important 顶掉 */
+    .cell.reply-new {
+      background-image: linear-gradient(90deg, rgba(74,122,240,0.10) 0%, rgba(74,122,240,0.04) 50%, transparent 100%) !important;
+      border-left: 3px solid var(--new-accent) !important;
       padding-left: 5px !important;
       animation: new-reply-flash 0.6s ease-out;
     }
@@ -533,19 +544,19 @@
       0%   { background-color: rgba(74,122,240,0.18); }
       100% { background-color: transparent; }
     }
-    /* NEW 是"这条回复的状态"，不是"这个人的属性"：
-       方角 + 实心蓝，和圆角描边的紫色标签胶囊在形状与颜色上都拉开距离；
-       位置也跟在时间戳后面，归入回复元信息一组，而不是贴着用户名。 */
-    .new-badge {
-      display: inline-block;
-      font-size: 9px; font-weight: 700;
-      color: var(--new-accent); background: var(--new-accent-soft);
-      border-radius: 2px;
-      padding: 0 4px; line-height: 13px; height: 13px;
-      margin-left: 6px;
-      vertical-align: middle; letter-spacing: 0.6px;
-      position: relative; top: -1px;
+    .cell.reply-new .fr .no {
+      color: #fff !important;
+      background: var(--new-accent) !important;
+      border-color: transparent;
+      box-shadow: 0 1px 3px rgba(74, 122, 240, 0.35);
     }
+    .cell.reply-new .fr .no::before {
+      content: ''; flex: 0 0 auto;
+      width: 4px; height: 4px; border-radius: 50%;
+      background: #fff; opacity: 0.92;
+    }
+    /* 未读药丸已经是实心的，别让上面那条 hover 规则再给它描一圈灰边 */
+    .cell.reply-new:hover .fr .no { color: #fff !important; border-color: transparent; }
 
     #v2ex-new-count-bar {
       padding: 6px 12px;
@@ -771,9 +782,15 @@
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
-      --bg-new: #23304d;
     }
     #Wrapper.Night .reply-wrapper .cell { border-bottom-color: #303239 !important; }
+    #Wrapper.Night .reply-wrapper .fr .no { color: #676c75 !important; }
+    #Wrapper.Night .reply-wrapper > .cell:hover .fr .no {
+      color: #9aa1ab !important; border-color: rgba(255, 255, 255, 0.13);
+    }
+    #Wrapper.Night .cell.reply-new .fr .no { color: #10131a !important; box-shadow: none; }
+    #Wrapper.Night .cell.reply-new .fr .no::before { background: #10131a; opacity: 0.75; }
+    #Wrapper.Night .cell.reply-new:hover .fr .no { color: #10131a !important; border-color: transparent; }
     #Wrapper.Night .reply-collapsed-hint { color: #7b818c; }
     #Wrapper.Night #v2ex-new-count-bar {
       background: linear-gradient(90deg, #262b3a 0%, #23252b 100%);
@@ -1342,10 +1359,10 @@
     }
 
     // ── 头部重排 ──
-    // V2EX 原始结构是一串行内节点，楼层块浮动在右，NEW 只能插在行内跟着用户名长度飘。
-    // 这里把它整理成一个 flex 行，让 NEW 有一个真正贴住右边缘的定宽槽位：
-    // [用户名 + 标签] [时间 ♥] ——弹性留白—— [楼层块] [NEW]
-    // 时间维持原位（紧跟用户名），只有 NEW 被拉到右边。
+    // V2EX 原始结构是一串行内节点，楼层块靠 float:right 贴右边。这里改成一个
+    // flex 行，用一段弹性留白把楼层块推到右边缘：
+    // [用户名 + 标签] [时间 ♥] ——弹性留白—— [♥ ↩ 楼层号]
+    // 时间维持原位（紧跟用户名）。未读状态直接画在楼层号上，不额外插节点。
     // 结构不符合预期时直接返回，保持 V2EX 原样，不做半吊子改动。
     function layoutReplyHeader(cell) {
       const strong = cell.querySelector('strong');
@@ -1370,17 +1387,14 @@
       meta.className = 'rh-meta';
       const gap = document.createElement('span');
       gap.className = 'rh-gap';
-      const newSlot = document.createElement('span');
-      newSlot.className = 'rh-new';
 
       // 先把空的 head 挂进文档，再往里搬节点。反过来做的话，一旦中途抛异常，
-      // 用户名/时间/NEW 会跟着游离的 head 一起从页面上消失。
+      // 用户名/时间会跟着游离的 head 一起从页面上消失。
       container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
       head.append(identity, meta, gap);
 
       const likes = [];
       const times = [];
-      const badges = [];
       for (const node of nodes) {
         if (node.nodeType === Node.TEXT_NODE) {
           // 原来的 &nbsp; 间隔交给 flex gap，非空文本保留在左侧
@@ -1391,52 +1405,16 @@
         if (node.nodeType !== Node.ELEMENT_NODE) { node.remove(); continue; }
         const cls = node.classList;
         if (cls.contains('ago')) times.push(node);
-        else if (cls.contains('new-badge')) badges.push(node);
         else if (cls.contains('small') && cls.contains('fade')) likes.push(node);
         else identity.appendChild(node);   // strong / badges / 未知元素一律留在左侧
       }
 
       // 时间在前、♥ 在后，保持 V2EX 原本的阅读顺序
       meta.append(...times, ...likes);
-      newSlot.append(...badges);
 
+      // 楼层块（感谢/回复按钮 + 楼层号）整体挪到头部末尾，由 .rh-gap 顶到最右。
       const floor = container.querySelector(':scope > .fr');
-      if (!floor) {
-        head.appendChild(newSlot);   // 没有楼层块时退到行尾
-        return;
-      }
-
-      // NEW 插在楼层块里、第一个可见操作（感谢/回复按钮）之前。
-      // 用"第一个 a/img/.no"定位而不是插到最前面：.fr 前部可能有空白或隐藏节点。
-      // 注意 querySelector 命中的可能是孙子节点——登录后"感谢"按钮就包在
-      // <div class="thank_area"> 里——而 insertBefore 只接受直接子节点，
-      // 所以要沿 parentElement 回溯到 .fr 的直接子节点为止。
-      let ref = floor.querySelector('a, img, .no');
-      while (ref && ref.parentElement !== floor) ref = ref.parentElement;
-      floor.insertBefore(newSlot, ref || floor.firstChild);
-      head.appendChild(floor);
-    }
-
-    // .fr 里的操作按钮各行不一定一样多——自己的回复没有"感谢"按钮，已感谢过的
-    // 楼层图标也不同——NEW 紧贴按钮就会被顶得左右横跳。这里量出最宽的一组按钮，
-    // 给按钮较少的行补等量右边距：NEW 既贴着按钮，又落在同一条竖直基线上。
-    // （.fr 的右边缘本来就都贴着行右边缘，所以对齐右边距就等于对齐 NEW。）
-    function alignNewBadges(container) {
-      const slots = [...container.querySelectorAll('.fr > .rh-new')].filter(slot => slot.firstChild);
-      if (slots.length < 2) return;
-      const trailing = [];
-      let widest = 0;
-      for (const slot of slots) {
-        const next = slot.nextElementSibling;
-        const width = next
-          ? slot.parentElement.getBoundingClientRect().right - next.getBoundingClientRect().left
-          : 0;
-        trailing.push(width);
-        if (width > widest) widest = width;
-      }
-      slots.forEach((slot, index) => {
-        slot.style.marginRight = `${Math.max(0, Math.round(widest - trailing[index])) + 8}px`;
-      });
+      if (floor) head.appendChild(floor);
     }
 
     // ── 渲染树 ──
@@ -1550,16 +1528,11 @@
       for (const r of replies) {
         if (r.floorNum <= state.lastReadFloor) continue;
         newCount++;
+        // 未读状态全靠这个 class 驱动：行左边的蓝条 + 楼层号变成实心蓝药丸，
+        // 不再往头部塞任何额外节点（见 .cell.reply-new .fr .no）
         r.element.classList.add('reply-new');
-        if (r.element.querySelector('.new-badge')) continue;
-        const badge = document.createElement('span');
-        badge.className = 'new-badge'; badge.textContent = 'NEW'; badge.title = '未读新回复';
-        // 头部已重排时放进预留槽位（对齐成一列）；
-        // 否则退回到时间戳后面，跟回复元信息待在一起
-        const slot = r.element.querySelector('.rh-new');
-        if (slot) { slot.appendChild(badge); continue; }
-        const anchor = r.element.querySelector('.ago') || r.element.querySelector('strong');
-        anchor?.insertAdjacentElement('afterend', badge);
+        const floorEl = r.element.querySelector('.fr .no');
+        if (floorEl) floorEl.title = '未读新回复';
       }
       return newCount;
     }
@@ -1872,7 +1845,6 @@
       let newCount = markUnread(readState, allReplies);
       renderTree(allReplies, maps, replyBox, topicId);
       UserTags.decorate(replyBox);
-      alignNewBadges(replyBox);
 
       loadingBar.remove();
       log(`楼层树：${allReplies.length} 条回复 / 共 ${totalPages} 页（失败 ${failedPages.length} 页），`
@@ -1914,7 +1886,6 @@
               newCount = markUnread(readState, allReplies);
               renderTree(allReplies, maps, replyBox, topicId);
               UserTags.decorate(replyBox);
-              alignNewBadges(replyBox);
               updateNewCountBar(replyBox, newCount);
               scheduleHoverPreview();
             }
