@@ -86,6 +86,25 @@
     try { GM_notification({ title, text, timeout }); } catch (_) {}
   }
 
+  // 不是所有管理器都提供 GM_addStyle（Greasemonkey 只有 GM.addStyle），
+  // 缺了它就直接抛异常、整个脚本停在这里——楼层树连跑都没跑。退回自己插 <style>。
+  function addStyle(css) {
+    try {
+      if (typeof GM_addStyle === 'function') return GM_addStyle(css);
+    } catch (err) {
+      log('GM_addStyle 失败，改用 <style> 注入：', err);
+    }
+    try {
+      const style = document.createElement('style');
+      style.textContent = css;
+      (document.head || document.documentElement).appendChild(style);
+      return style;
+    } catch (err) {
+      log('样式注入失败：', err);
+      return null;
+    }
+  }
+
   // V2EX 服务端按 UTC+8 跨天，签到判重必须用同一时区，否则 16:00Z–24:00Z 这段
   // 时间里（北京时间次日 0–8 点）会误判为"今天已签到"而漏签。
   const YMD_FORMATTER = (() => {
@@ -172,7 +191,7 @@
   // =========================
 
   // ── 全站样式：用户标签胶囊 / 编辑气泡 / 管理面板 / Toast ──
-  GM_addStyle(`
+  addStyle(`
     :root {
       --v2t-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       --v2t-surface: #fff;
@@ -378,7 +397,7 @@
 
   `);
 
-  if (isTopicPage()) GM_addStyle(`
+  if (isTopicPage()) addStyle(`
     /* ===== 楼层树 ===== */
     :root {
       --indent-width: 16px;
@@ -1194,9 +1213,32 @@
       };
     }
 
+    // 其它分页的 HTML 要解析成文档再把楼层搬进当前页面。在沙箱环境里
+    // （Firefox 的 Xray）DOMParser 建出的文档和页面文档主体不同，跨文档搬运
+    // 可能失败，所以优先用页面自己的 document.implementation 建文档。
+    function parseReplyDoc(html) {
+      try {
+        const doc = document.implementation.createHTMLDocument('');
+        doc.documentElement.innerHTML = html;
+        if (doc.querySelector('div.cell[id^="r_"]')) return doc;
+      } catch (err) {
+        log('createHTMLDocument 解析失败，回退 DOMParser：', err);
+      }
+      return new DOMParser().parseFromString(html, 'text/html');
+    }
+
     function extractRepliesFromDoc(doc) {
+      // 外来文档的节点先 importNode 成本页面拥有的节点，避免依赖 appendChild 的隐式 adopt
+      const foreign = doc !== document;
       return Array.from(doc.querySelectorAll('div.cell[id^="r_"]'))
-        .map((cell, idx) => parseReplyCell(cell, idx))
+        .map((cell, idx) => {
+          let node = cell;
+          if (foreign) {
+            try { node = document.importNode(cell, true); }
+            catch (err) { log('importNode 失败，直接使用原节点：', err); }
+          }
+          return parseReplyCell(node, idx);
+        })
         .filter(Boolean);
     }
 
@@ -1425,7 +1467,9 @@
         wrapper.className = 'reply-wrapper';
         wrapper.dataset.replyId = reply.id;
         reply.element.classList.remove('inner');
-        layoutReplyHeader(reply.element);
+        // 头部重排纯属美化，任何意外都不该连累整棵树
+        try { layoutReplyHeader(reply.element); }
+        catch (err) { log('楼层头部重排失败：', err); }
         wrapper.appendChild(reply.element);
 
         if (reply.children.length > 0) {
@@ -1449,7 +1493,15 @@
         parentEl.appendChild(wrapper);
       }
 
-      roots.forEach(r => appendNode(r, fragment));
+      try {
+        roots.forEach(r => appendNode(r, fragment));
+      } catch (err) {
+        // 兜底：宁可平铺显示，也不能因为建树失败把回复弄丢
+        // （楼层此时已被搬进 fragment，直接放弃会导致整页回复消失）
+        log('构建楼层树失败，退回平铺显示：', err);
+        fragment.replaceChildren();
+        for (const reply of flatReplies) fragment.appendChild(reply.element);
+      }
       container.innerHTML = '';
       container.appendChild(fragment);
     }
@@ -1692,7 +1744,7 @@
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+        const doc = parseReplyDoc(await res.text());
         const replies = extractRepliesFromDoc(doc);
         if (!replies.length) throw new Error('页面中没有回复');
         return replies;
@@ -1759,7 +1811,10 @@
       if (!topicId) return;
 
       const replyBox = Array.from(document.querySelectorAll('.box')).find(b => b.querySelector('div[id^="r_"]'));
-      if (!replyBox) return;
+      if (!replyBox) {
+        log('楼层树：没找到回复容器（.box 内无 div[id^="r_"]），已跳过');
+        return;
+      }
 
       const loadingBar = document.createElement('div');
       loadingBar.id = 'v2ex-loading-bar'; loadingBar.textContent = '加载中…';
@@ -1794,6 +1849,8 @@
       alignNewBadges(replyBox);
 
       loadingBar.remove();
+      log(`楼层树：${allReplies.length} 条回复 / 共 ${totalPages} 页（失败 ${failedPages.length} 页），`
+        + `嵌套 ${replyBox.querySelectorAll('.reply-children').length} 组，未读 ${newCount} 条`);
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
       updateNewCountBar(replyBox, newCount);
       if (!failedPages.length) commitReadState(readState, allReplies);
