@@ -400,9 +400,10 @@
   if (isTopicPage()) addStyle(`
     /* ===== 楼层树 ===== */
     :root {
-      --indent-width: 16px;
-      --line-color: #ebebeb;
-      --line-hover: #a8beff;
+      --indent-width: 18px;
+      --rail-gap: 12px;
+      --line-color: rgba(128, 128, 128, 0.3);
+      --line-hover: #7fa0f5;
       --bg-hover: #fafbff;
       --new-accent: #4a7af0;
       --new-accent-soft: rgba(74, 122, 240, 0.08);
@@ -411,12 +412,29 @@
 
     .box { padding-bottom: 0 !important; }
 
+    /* 竖线（层级导轨）+ 每个直接子回复一小段横线（肘接），
+       让"谁挂在谁下面"一眼可见，而不是只靠缩进去猜 */
     .reply-children {
       margin-left: var(--indent-width);
+      padding-left: var(--rail-gap);
       border-left: 2px solid var(--line-color);
       transition: border-color 0.2s, opacity 0.2s;
       position: relative;
     }
+    .reply-children > .reply-wrapper { position: relative; }
+    .reply-children > .reply-wrapper::before {
+      content: '';
+      position: absolute;
+      left: calc(var(--rail-gap) * -1);
+      top: 19px;
+      width: var(--rail-gap);
+      height: 2px;
+      background: var(--line-color);
+      transition: background 0.2s;
+      pointer-events: none;
+    }
+    /* 悬停整棵子树时导轨与肘接一起点亮，边界立刻变清楚 */
+    .reply-children:hover > .reply-wrapper::before { background: var(--line-hover); }
     .reply-children.is-collapsed { display: none; }
 
     /* cursor:auto 保留浏览器默认行为（文字上 I 型，空白处箭头）
@@ -436,16 +454,18 @@
     .reply-collapsed-hint {
       display: none;
       font-size: 11px; color: #999;
-      padding: 3px 8px 3px calc(var(--indent-width) + 4px);
+      padding: 3px 8px 3px calc(var(--indent-width) + var(--rail-gap));
       cursor: pointer; user-select: none;
       transition: color 0.15s;
     }
     .reply-collapsed-hint:hover { color: var(--new-accent); }
     .reply-children.is-collapsed + .reply-collapsed-hint { display: block; }
 
+    /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
+       之前自己写死的 #f5f5f5 在白底上几乎看不见 */
     .reply-wrapper .cell {
-      padding: 6px 8px !important;
-      border-bottom: 1px solid #f5f5f5 !important;
+      padding: 10px !important;
+      border-bottom: 1px solid var(--box-border-color, rgba(128, 128, 128, 0.228)) !important;
       background: transparent;
       transition: background 0.12s;
     }
@@ -747,8 +767,8 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
-      --line-color: #3a3d45;
-      --line-hover: #4c6bb5;
+      --line-color: rgba(150, 150, 150, 0.38);
+      --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
       --bg-new: #23304d;
