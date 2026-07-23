@@ -477,17 +477,21 @@
       flex: 0 0 auto; white-space: nowrap;
     }
     .v2-reply-head .rh-gap { flex: 1 1 auto; min-width: 8px; }
-    /* 感谢/回复按钮 + 楼层号：右边缘紧贴 NEW 槽位，
-       所以里面有没有 ♥ 按钮、楼层是两位还是三位，都只影响它自己的左边缘 */
+    /* 感谢/回复按钮 + 楼层号：整体右边缘贴住行的右边缘（同 V2EX 原样） */
     .v2-reply-head > .fr {
       float: none !important;
       display: inline-flex; align-items: center;
       flex: 0 0 auto; margin: 0 !important;
     }
-    /* NEW 的槽位在每条回复上都存在（未读时才填内容），
-       定宽 + 居右，于是所有 NEW 落在同一条竖直基线上 */
-    .v2-reply-head .rh-new { flex: 0 0 34px; text-align: right; }
-    .v2-reply-head .rh-new .new-badge { margin-left: 0; }
+    /* NEW 就放在这一组按钮的左边。已读行槽位为空、不占宽度，
+       按钮和楼层号始终贴右边缘，所以两种行的右侧仍然对齐。 */
+    .v2-reply-head .fr .rh-new { flex: 0 0 auto; display: inline-flex; align-items: center; }
+    .v2-reply-head .fr .rh-new:not(:empty) { margin-right: 8px; }
+    .v2-reply-head .fr .new-badge { margin-left: 0; }
+    /* 楼层号等宽：否则 #3 和 #1234 会让左边的 NEW 左右横跳 */
+    .v2-reply-head .fr .no {
+      display: inline-block; min-width: 30px; text-align: center;
+    }
 
     .reply-new > .cell {
       background: linear-gradient(90deg, rgba(74,122,240,0.10) 0%, rgba(74,122,240,0.04) 50%, transparent 100%) !important;
@@ -1339,13 +1343,41 @@
       newSlot.append(...badges);
       head.append(identity, meta, gap);
 
-      // 楼层块在前、NEW 在最后：NEW 因此贴住行的右边缘，
-      // 楼层块宽度怎么变（♥ 按钮出现与否、楼层位数）都只影响它自己
       const floor = container.querySelector(':scope > .fr');
-      if (floor) head.appendChild(floor);
-      head.appendChild(newSlot);
+      if (floor) {
+        // NEW 插在楼层块里、第一个可见操作（感谢/回复按钮）之前。
+        // 用"第一个 a/img/.no"定位而不是插到最前面：.fr 前部可能有
+        // 空白或隐藏节点，插在那里会让 NEW 离按钮很远。
+        const firstAction = floor.querySelector('a, img, .no');
+        floor.insertBefore(newSlot, firstAction || floor.firstChild);
+        head.appendChild(floor);
+      } else {
+        head.appendChild(newSlot);   // 没有楼层块时退到行尾
+      }
 
       container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
+    }
+
+    // .fr 里的操作按钮各行不一定一样多——自己的回复没有"感谢"按钮，已感谢过的
+    // 楼层图标也不同——NEW 紧贴按钮就会被顶得左右横跳。这里量出最宽的一组按钮，
+    // 给按钮较少的行补等量右边距：NEW 既贴着按钮，又落在同一条竖直基线上。
+    // （.fr 的右边缘本来就都贴着行右边缘，所以对齐右边距就等于对齐 NEW。）
+    function alignNewBadges(container) {
+      const slots = [...container.querySelectorAll('.fr > .rh-new')].filter(slot => slot.firstChild);
+      if (slots.length < 2) return;
+      const trailing = [];
+      let widest = 0;
+      for (const slot of slots) {
+        const next = slot.nextElementSibling;
+        const width = next
+          ? slot.parentElement.getBoundingClientRect().right - next.getBoundingClientRect().left
+          : 0;
+        trailing.push(width);
+        if (width > widest) widest = width;
+      }
+      slots.forEach((slot, index) => {
+        slot.style.marginRight = `${Math.max(0, Math.round(widest - trailing[index])) + 8}px`;
+      });
     }
 
     // ── 渲染树 ──
@@ -1768,6 +1800,7 @@
       let newCount = markUnread(readState, allReplies);
       renderTree(allReplies, maps, replyBox, topicId);
       UserTags.decorate(replyBox);
+      alignNewBadges(replyBox);
 
       loadingBar.remove();
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
@@ -1807,6 +1840,7 @@
               newCount = markUnread(readState, allReplies);
               renderTree(allReplies, maps, replyBox, topicId);
               UserTags.decorate(replyBox);
+              alignNewBadges(replyBox);
               updateNewCountBar(replyBox, newCount);
               scheduleHoverPreview();
             }
