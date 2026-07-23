@@ -402,8 +402,10 @@
     /* ===== 楼层树 ===== */
     :root {
       --indent-width: 18px;
-      --rail-gap: 12px;
-      --line-color: rgba(128, 128, 128, 0.3);
+      --rail-gap: 13px;      /* 竖导轨到子回复左边缘的横向距离 = 肘接横线的长度 */
+      --rail-width: 1px;     /* 1px 的细线比 2px 干净得多，靠透明度补可见性 */
+      --elbow-top: 19px;     /* 肘接横线的高度，对准子回复头像的上半部 */
+      --line-color: rgba(128, 128, 128, 0.38);
       --line-hover: #7fa0f5;
       --bg-hover: #fafbff;
       --new-accent: #4a7af0;
@@ -412,48 +414,84 @@
     .box { padding-bottom: 0 !important; }
 
     /* 竖线（层级导轨）+ 每个直接子回复一小段横线（肘接），
-       让"谁挂在谁下面"一眼可见，而不是只靠缩进去猜 */
+       让"谁挂在谁下面"一眼可见，而不是只靠缩进去猜。
+
+       导轨不再画成容器的 border-left：那样它会一路拖到整棵子树的最底下，
+       在最后一个子回复的肘接之后还垂着一大截没有任何含义的尾巴。
+       改成每个子回复自带一段竖线、首尾相接拼出整条导轨，
+       最后一个就能在肘接处收住，画成一个圆角 └。 */
     .reply-children {
       margin-left: var(--indent-width);
-      padding-left: var(--rail-gap);
-      border-left: 2px solid var(--line-color);
-      transition: border-color 0.2s, opacity 0.2s;
+      padding-left: calc(var(--rail-gap) + var(--rail-width));
+      transition: opacity 0.2s;
       position: relative;
     }
-    .reply-children > .reply-wrapper { position: relative; }
+    /* 线的颜色统一走这个变量，悬停时只要换它一处，
+       竖线（background）和圆角 └（border-color）就一起变 */
+    .reply-children > .reply-wrapper { position: relative; --rail-ink: var(--line-color); }
+
+    /* 竖直段：从上一个兄弟接过来，贯穿整个 wrapper（含它自己的子树） */
+    .reply-children > .reply-wrapper::after {
+      content: '';
+      position: absolute;
+      left: calc((var(--rail-gap) + var(--rail-width)) * -1);
+      top: 0; bottom: 0;
+      width: var(--rail-width);
+      background: var(--rail-ink);
+      transition: background 0.2s;
+      pointer-events: none;
+    }
+    /* 肘接：从导轨横向接到子回复左边缘（├ 的那一横） */
     .reply-children > .reply-wrapper::before {
       content: '';
       position: absolute;
       left: calc(var(--rail-gap) * -1);
-      top: 19px;
+      top: var(--elbow-top);
       width: var(--rail-gap);
-      height: 2px;
-      background: var(--line-color);
+      height: var(--rail-width);
+      background: var(--rail-ink);
       transition: background 0.2s;
       pointer-events: none;
     }
-    /* 悬停整棵子树时导轨与肘接一起点亮，边界立刻变清楚 */
-    .reply-children:hover > .reply-wrapper::before { background: var(--line-hover); }
+    /* 最后一个子回复：竖直段和肘接合成一个带圆角的 └，竖线到此为止 */
+    .reply-children > .reply-wrapper:last-child::before { display: none; }
+    .reply-children > .reply-wrapper:last-child::after {
+      box-sizing: border-box;
+      bottom: auto;
+      width: calc(var(--rail-gap) + var(--rail-width));
+      height: calc(var(--elbow-top) + var(--rail-width));
+      background: none;
+      border-left: var(--rail-width) solid var(--rail-ink);
+      border-bottom: var(--rail-width) solid var(--rail-ink);
+      border-bottom-left-radius: 6px;
+      transition: border-color 0.2s;
+    }
+    /* 悬停点亮导轨，但只点亮鼠标当前所在的那一层：:hover 会一路冒泡到所有
+       祖先容器，不加这个 :not(:has(…)) 的话，悬停一条深层回复会把左边每一层
+       的导轨全部点亮，反而看不出层级。 */
+    .reply-children:hover:not(:has(.reply-children:hover)) > .reply-wrapper {
+      --rail-ink: var(--line-hover);
+    }
     .reply-children.is-collapsed { display: none; }
 
     /* cursor:auto 保留浏览器默认行为（文字上 I 型，空白处箭头）
        只在左侧 20px 伪元素上设 pointer，与 JS 的 rect.left > 20 判断对齐 */
     .reply-children.collapsible { cursor: auto; }
+    /* 导轨的 border-left 没了，容器 padding box 的左边缘就是导轨所在处，
+       点击热区从 left: 0 起算即可（原来要 -2px 去补那条边框的宽度） */
     .reply-children.collapsible::before {
       content: '';
       position: absolute;
-      left: -2px;
+      left: 0;
       top: 0; bottom: 0;
       width: 20px;
       cursor: pointer;
     }
-    .reply-children.collapsible:hover { border-left-color: var(--line-hover); }
-    .reply-children .reply-children { pointer-events: auto; }
 
     .reply-collapsed-hint {
       display: none;
       font-size: 11px; color: #999;
-      padding: 3px 8px 3px calc(var(--indent-width) + var(--rail-gap));
+      padding: 3px 8px 3px calc(var(--indent-width) + var(--rail-gap) + var(--rail-width));
       cursor: pointer; user-select: none;
       transition: color 0.15s;
     }
@@ -534,12 +572,12 @@
       color: #8b9098 !important; border-color: rgba(0, 0, 0, 0.09);
     }
 
-    /* 只压 background-image，不动 background-color：
-       hover 的底色和下面那段 flash 动画才不会被 !important 顶掉 */
+    /* 未读行只留左边一条蓝竖条，不铺任何底色——楼层号那颗实心药丸已经够醒目了。
+       3px 边框 + 7px 内边距 = 普通行的 10px，正文左边缘不会跟着错开。
+       只有进场那一下闪一次（背景不带 !important，动画才压得住）。 */
     .cell.reply-new {
-      background-image: linear-gradient(90deg, rgba(74,122,240,0.10) 0%, rgba(74,122,240,0.04) 50%, transparent 100%) !important;
       border-left: 3px solid var(--new-accent) !important;
-      padding-left: 5px !important;
+      padding-left: 7px !important;
       animation: new-reply-flash 0.6s ease-out;
     }
     @keyframes new-reply-flash {
@@ -774,7 +812,7 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
-      --line-color: rgba(150, 150, 150, 0.38);
+      --line-color: rgba(150, 150, 150, 0.5);
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
