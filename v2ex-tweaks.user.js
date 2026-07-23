@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.3.0
+// @version      2.4.0
 // @description  V2EX 日常增强：回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -12,6 +12,10 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_notification
+// @grant        GM_xmlhttpRequest
+// @connect      v2ex.com
+// @connect      www.v2ex.com
+// @connect      edge.v2ex.com
 // @run-at       document-end
 // @license      MIT
 // ==/UserScript==
@@ -27,7 +31,10 @@
       page: '/mission/daily',
       delayMinMs: 1500,
       delayMaxMs: 3800,
-      storeKey: 'v2ex_daily_check_ymd_v2',
+      requestTimeoutMs: 12000,
+      verifyRetries: 3,
+      verifyIntervalMs: 900,
+      storeKey: 'v2ex_daily_check_ymd_v3',
       notify: true,
     },
     b64: {
@@ -62,9 +69,8 @@
     try { GM_notification({ title, text, timeout }); } catch (_) {}
   }
 
-  function ymdLocal() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  function ymdUtc(time = Date.now()) {
+    return new Date(time).toISOString().slice(0, 10);
   }
 
   function isTopicPage() {
@@ -397,33 +403,118 @@
   // 3) 功能A：每日自动签到
   // =========================
   const Daily = (() => {
-    function isLoggedIn() {
-      return !!document.querySelector('#Top a[href^="/signout"], #Top a[onclick*="/signout?once="]');
-    }
-    async function fetchText(url) {
-      const res = await fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-      return res.text();
+    const CLAIMED_RE = /每日登录奖励已领取|今天的登录奖励已经领取过了(?:哦)?|今天已经领取|已成功领取每日登录奖励|成功领取每日登录奖励|奖励已发放/i;
+    const REJECTED_RE = /浏览器有一些奇奇怪怪的设置|请用一个干净安装的浏览器重试/i;
+    const MAX_TIMER_MS = 0x7fffffff;
+    let inFlight = null;
+    let nextDayTimer = 0;
+
+    function requestText(url) {
+      const target = new URL(url, location.origin);
+      if (target.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: target.href,
+          responseType: 'text',
+          timeout: CONFIG.daily.requestTimeoutMs,
+          headers: { Accept: 'text/html,application/xhtml+xml' },
+          onload: response => {
+            if (response.status < 200 || response.status >= 400) {
+              reject(new Error(`HTTP ${response.status} for ${target.pathname}`));
+              return;
+            }
+            resolve({
+              text: typeof response.responseText === 'string'
+                ? response.responseText
+                : (typeof response.response === 'string' ? response.response : ''),
+              finalUrl: response.finalUrl || target.href,
+            });
+          },
+          ontimeout: () => reject(new Error(`请求超时：${target.pathname}`)),
+          onerror: () => reject(new Error(`请求失败：${target.pathname}`)),
+          onabort: () => reject(new Error(`请求已取消：${target.pathname}`)),
+        });
+      });
     }
     function parseHtml(html) { return new DOMParser().parseFromString(html, 'text/html'); }
-    function alreadyRedeemed(doc) {
-      return /已领取|已经领取|每日登录奖励已领取|redeemed|already redeemed|已完成/i.test(doc.body?.textContent || '');
+
+    function pageText(doc) {
+      return (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
     }
+
+    function isSignedOut(doc, finalUrl = location.href) {
+      let finalPath = '';
+      try { finalPath = new URL(finalUrl, location.origin).pathname; } catch (_) {}
+      if (finalPath.startsWith('/signin')) return true;
+      const signin = doc.querySelector('#Top a[href^="/signin"], form[action^="/signin"]');
+      const member = doc.querySelector('#Top a[href^="/member/"], #Top a[onclick*="/signout?once="]');
+      return !!signin && !member;
+    }
+
+    function alreadyRedeemed(doc) {
+      return !!doc.querySelector('li.fa.fa-ok-sign, .fa-ok-sign') || CLAIMED_RE.test(pageText(doc));
+    }
+
     function findRedeemUrl(doc) {
-      const a = doc.querySelector('a[href^="/mission/daily/redeem"]');
-      if (a?.getAttribute('href')) return a.getAttribute('href');
-      const any = [...doc.querySelectorAll('[onclick]')].find(el => (el.getAttribute('onclick') || '').includes('/mission/daily/redeem'));
-      if (any) {
-        const match = (any.getAttribute('onclick') || '').match(/\/mission\/daily\/redeem[^'"\s)]*/);
-        if (match?.[0]) return match[0];
+      const selectors = [
+        'a[href*="/mission/daily/redeem"]',
+        'form[action*="/mission/daily/redeem"]',
+        '[onclick*="/mission/daily/redeem"]',
+      ];
+      for (const el of doc.querySelectorAll(selectors.join(','))) {
+        const source = [el.getAttribute('href'), el.getAttribute('action'), el.getAttribute('onclick')]
+          .filter(Boolean).join(' ');
+        const match = source.match(/\/mission\/daily\/redeem\?[^'"<>\s)]*\bonce=([A-Za-z0-9_-]+)/i);
+        if (match?.[1]) return `/mission/daily/redeem?once=${encodeURIComponent(match[1])}`;
       }
+
+      // 兼容领取地址被放在内联脚本或转义 HTML 中的旧版页面。
+      const match = (doc.documentElement?.innerHTML || '')
+        .replaceAll('&amp;', '&')
+        .match(/\/mission\/daily\/redeem\?[^'"<>\s)]*\bonce=([A-Za-z0-9_-]+)/i);
+      if (match?.[1]) return `/mission/daily/redeem?once=${encodeURIComponent(match[1])}`;
       return null;
     }
-    async function run() {
-      const { notify: doNotify, page, delayMinMs, delayMaxMs, storeKey } = CONFIG.daily;
-      if (!isLoggedIn()) return;
-      const today = ymdLocal();
+
+    async function loadPage(url) {
+      const response = await requestText(url);
+      const doc = parseHtml(response.text);
+      return { ...response, doc };
+    }
+
+    function validateRedeemUrl(redeemUrl) {
+      const target = new URL(redeemUrl, location.origin);
+      if (target.origin !== location.origin || target.pathname !== '/mission/daily/redeem' || !target.searchParams.get('once')) {
+        throw new Error('领取地址无效');
+      }
+      return target;
+    }
+
+    async function verifyClaimed(page, retries, intervalMs) {
+      let lastStatus = 'unknown';
+      for (let attempt = 0; attempt < retries; attempt++) {
+        if (attempt > 0) await sleep(intervalMs);
+        const result = await loadPage(page);
+        if (isSignedOut(result.doc, result.finalUrl)) return { status: 'signed-out', result };
+        if (REJECTED_RE.test(pageText(result.doc))) return { status: 'rejected', result };
+        if (alreadyRedeemed(result.doc)) return { status: 'claimed', result };
+        lastStatus = findRedeemUrl(result.doc) ? 'claimable' : 'unknown';
+      }
+      return { status: lastStatus };
+    }
+
+    async function execute() {
+      const {
+        notify: doNotify, page, delayMinMs, delayMaxMs, storeKey,
+        verifyRetries, verifyIntervalMs,
+      } = CONFIG.daily;
+      const today = ymdUtc();
       if (GM_getValue(storeKey, '') === today) return;
+      if (isSignedOut(document, location.href)) {
+        log('签到：账号未登录，已跳过');
+        return;
+      }
       const lockKey = `${storeKey}_lock`;
       const lock = GM_getValue(lockKey, null);
       if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) return;
@@ -434,50 +525,83 @@
 
       try {
         await sleep(randInt(delayMinMs, delayMaxMs));
-        const doc1 = parseHtml(await fetchText(page));
-        if (alreadyRedeemed(doc1)) {
+        const daily = await loadPage(page);
+        if (isSignedOut(daily.doc, daily.finalUrl)) {
+          log('签到：账号未登录，已跳过');
+          return;
+        }
+        if (REJECTED_RE.test(pageText(daily.doc))) {
+          throw new Error('V2EX 拒绝了当前浏览器环境');
+        }
+        if (alreadyRedeemed(daily.doc)) {
           GM_setValue(storeKey, today);
+          log('签到：今日奖励已领取');
           dailyNotify('今日奖励已领取');
           return;
         }
 
-        const redeemUrl = findRedeemUrl(doc1);
+        const redeemUrl = findRedeemUrl(daily.doc);
         if (!redeemUrl) {
-          dailyNotify('未找到领取按钮（可能结构变更）');
-          return;
+          throw new Error('未找到领取按钮（页面结构可能已变更）');
         }
 
-        const target = new URL(redeemUrl, location.origin);
-        if (target.origin !== location.origin || target.pathname !== '/mission/daily/redeem') {
-          throw new Error('领取地址无效');
-        }
+        const target = validateRedeemUrl(redeemUrl);
+        const redeem = await loadPage(target.href);
+        if (isSignedOut(redeem.doc, redeem.finalUrl)) throw new Error('登录状态已失效');
+        if (REJECTED_RE.test(pageText(redeem.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
 
-        const doc2 = parseHtml(await fetchText(target.href));
-        let confirmed = alreadyRedeemed(doc2) || /领取成功|成功领取|奖励已发放/.test(doc2.body?.textContent || '');
+        let confirmed = alreadyRedeemed(redeem.doc);
         if (!confirmed) {
-          const verifyDoc = parseHtml(await fetchText(page));
-          confirmed = alreadyRedeemed(verifyDoc);
+          const verification = await verifyClaimed(page, verifyRetries, verifyIntervalMs);
+          if (verification.status === 'signed-out') throw new Error('登录状态已失效');
+          if (verification.status === 'rejected') throw new Error('V2EX 拒绝了当前浏览器环境');
+          confirmed = verification.status === 'claimed';
         }
+
         if (confirmed) {
           GM_setValue(storeKey, today);
+          log('签到：领取成功');
           dailyNotify('领取成功 ✅');
         } else {
-          dailyNotify('已发起领取，但未能确认结果');
+          throw new Error('领取请求已发送，但服务端未确认成功');
         }
       } finally {
         if (GM_getValue(lockKey, null)?.token === token) GM_setValue(lockKey, null);
       }
     }
+
+    function run() {
+      if (inFlight) return inFlight;
+      inFlight = execute().catch(err => {
+        log('签到失败：', err);
+        if (CONFIG.daily.notify) notify('V2EX 签到', `失败：${err?.message || err}`);
+      }).finally(() => { inFlight = null; });
+      return inFlight;
+    }
+
+    function scheduleNextUtcDay() {
+      if (nextDayTimer) clearTimeout(nextDayTimer);
+      const now = Date.now();
+      const current = new Date(now);
+      const nextUtcDay = Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), current.getUTCDate() + 1);
+      const delay = Math.min(nextUtcDay - now + randInt(30000, 120000), MAX_TIMER_MS);
+      nextDayTimer = setTimeout(() => {
+        run().finally(scheduleNextUtcDay);
+      }, delay);
+    }
+
     function boot() {
-      const start = () => setTimeout(() => {
-        run().catch(err => {
-          if (CONFIG.daily.notify) notify('V2EX 签到', `失败：${err?.message || err}`);
-        });
-      }, 800);
+      const start = () => setTimeout(run, 800);
       if (document.readyState === 'complete') start();
       else window.addEventListener('load', start, { once: true });
+
+      // 页面跨 UTC 日期保持打开时也会重试；后台标签页恢复可见时再补一次。
+      scheduleNextUtcDay();
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && GM_getValue(CONFIG.daily.storeKey, '') !== ymdUtc()) run();
+      });
     }
-    return { boot };
+    return { boot, run };
   })();
 
   // =========================
