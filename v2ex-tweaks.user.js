@@ -1292,6 +1292,27 @@
   // =========================
   const ThreadTree = (() => {
 
+    // 楼层引用只应来自普通正文。按独立文本节点扫描，避免 textContent
+    // 把 <br> 两边拼在一起（例如链接以 # 结尾、下一行以 3. 开头时会伪造 #3）。
+    // 同时忽略链接和代码块，防止 URL / 示例代码中的 #数字 被当成回复引用。
+    const FLOOR_REF_EXCLUDED_TAGS = new Set(['A', 'CODE', 'PRE', 'SCRIPT', 'STYLE']);
+
+    function extractFloorReferences(contentEl) {
+      const floors = [];
+
+      function scan(node) {
+        if (node.nodeType === 3) {
+          for (const match of (node.nodeValue || '').matchAll(/#(\d+)/g)) floors.push(match[1]);
+          return;
+        }
+        if (node.nodeType !== 1 || FLOOR_REF_EXCLUDED_TAGS.has(node.tagName)) return;
+        for (const child of node.childNodes) scan(child);
+      }
+
+      scan(contentEl);
+      return floors;
+    }
+
     // ── 解析单条回复 ──
     function parseReplyCell(cell, idx) {
       if (!cell?.id?.startsWith('r_')) return null;
@@ -1310,7 +1331,7 @@
       const likesText  = cell.querySelector('span.small')?.textContent || '';
       const likes      = Number(likesText.match(/\d+/)?.[0] || 0);
       const refMemberNames = [...content.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(([, n]) => n);
-      const refFloors      = [...content.matchAll(/#(\d+)/g)].map(([, f]) => f);
+      const refFloors      = extractFloorReferences(contentEl);
 
       return {
         element: cell, floorEl, id: replyId, index: idx,
