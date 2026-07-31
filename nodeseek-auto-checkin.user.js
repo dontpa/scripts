@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NodeSeek 自动签到（试试手气）
 // @namespace    https://www.nodeseek.com/
-// @version      1.0.0
+// @version      1.0.1
 // @description  访问 NodeSeek 时自动前往隐藏签到页，并选择“试试手气”。
 // @author       you
 // @match        https://www.nodeseek.com/*
@@ -155,7 +155,21 @@
     const iframe = document.createElement('iframe');
     iframe.src = CONFIG.boardPath;
     iframe.setAttribute('aria-hidden', 'true');
-    iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;';
+    iframe.setAttribute('tabindex', '-1');
+    // 必须明确指定 top/left。只有 position:fixed 而没有定位坐标时，iframe
+    // 仍会使用文档末尾的静态位置；签到弹窗自动聚焦按钮时可能把主页面滚到底部。
+    iframe.style.cssText = [
+      'position:fixed',
+      'top:0',
+      'left:0',
+      'width:1px',
+      'height:1px',
+      'opacity:0',
+      'overflow:hidden',
+      'pointer-events:none',
+      'border:0',
+      'z-index:-2147483648',
+    ].join(';');
     document.documentElement.appendChild(iframe);
     window.setTimeout(() => iframe.remove(), CONFIG.iframeLifetimeMs);
   }
