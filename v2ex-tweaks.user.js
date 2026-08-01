@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.2
-// @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.4
+// @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -16,6 +16,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_notification
 // @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @connect      v2ex.com
 // @connect      www.v2ex.com
 // @connect      edge.v2ex.com
@@ -908,38 +909,89 @@
     let retryTimer = 0;
     let networkFailures = 0;
 
+    function shouldUseNativeRequest() {
+      // Safari 不允许扩展后台请求改写 Referer；V2EX 领取接口又会
+      // 校验该字段。改用页面同源 fetch，由 WebKit 带上登录 Cookie 和正确来源。
+      return /AppleWebKit/i.test(navigator.userAgent) && /Apple Computer/i.test(navigator.vendor || '');
+    }
+
+    async function requestTextWithFetch(target, referer) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CONFIG.daily.requestTimeoutMs);
+      try {
+        const options = {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          redirect: 'follow',
+          headers: { Accept: 'text/html,application/xhtml+xml' },
+          signal: controller.signal,
+        };
+        if (referer) options.referrer = new URL(referer, location.origin).href;
+
+        const response = await fetch(target.href, options);
+        if (!response.ok) throw new RetryableError(`HTTP ${response.status} for ${target.pathname}`);
+        return { text: await response.text(), finalUrl: response.url || target.href };
+      } catch (err) {
+        if (err instanceof RetryableError) throw err;
+        const reason = err?.name === 'AbortError' ? '请求超时' : '请求失败';
+        throw new RetryableError(`${reason}：${target.pathname}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function requestTextWithGM(target, referer) {
+      const legacyRequest = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null;
+      const modernRequest = typeof globalThis.GM?.xmlHttpRequest === 'function'
+        ? globalThis.GM.xmlHttpRequest.bind(globalThis.GM)
+        : null;
+      const send = legacyRequest || modernRequest;
+      if (!send) return requestTextWithFetch(target, referer);
+
+      const headers = { Accept: 'text/html,application/xhtml+xml' };
+      if (referer) headers.Referer = new URL(referer, location.origin).href;
+
+      return new Promise((resolve, reject) => {
+        const fail = message => reject(new RetryableError(`${message}：${target.pathname}`));
+        try {
+          const request = send({
+            method: 'GET',
+            url: target.href,
+            responseType: 'text',
+            timeout: CONFIG.daily.requestTimeoutMs,
+            headers,
+            onload: response => {
+              if (response.status < 200 || response.status >= 400) {
+                reject(new RetryableError(`HTTP ${response.status} for ${target.pathname}`));
+                return;
+              }
+              resolve({
+                text: typeof response.responseText === 'string'
+                  ? response.responseText
+                  : (typeof response.response === 'string' ? response.response : ''),
+                finalUrl: response.finalUrl || response.responseURL || target.href,
+              });
+            },
+            ontimeout: () => fail('请求超时'),
+            onerror: () => fail('请求失败'),
+            onabort: () => fail('请求已取消'),
+          });
+          // Safari Userscripts 的现代 API 同时返回 Promise；防止它只 reject
+          // 而没有触发 onerror 时留下未处理的 Promise rejection。
+          request?.catch?.(() => fail('请求失败'));
+        } catch (_) {
+          fail('请求失败');
+        }
+      });
+    }
+
     function requestText(url, referer) {
       const target = new URL(url, location.origin);
       if (target.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
-      const headers = { Accept: 'text/html,application/xhtml+xml' };
-      // V2EX 的领取接口会校验来源页，缺少 Referer 时请求会被判为异常来源而不发放奖励。
-      if (referer) {
-        try { headers.Referer = new URL(referer, location.origin).href; } catch (_) {}
-      }
-      return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: target.href,
-          responseType: 'text',
-          timeout: CONFIG.daily.requestTimeoutMs,
-          headers,
-          onload: response => {
-            if (response.status < 200 || response.status >= 400) {
-              reject(new RetryableError(`HTTP ${response.status} for ${target.pathname}`));
-              return;
-            }
-            resolve({
-              text: typeof response.responseText === 'string'
-                ? response.responseText
-                : (typeof response.response === 'string' ? response.response : ''),
-              finalUrl: response.finalUrl || target.href,
-            });
-          },
-          ontimeout: () => reject(new RetryableError(`请求超时：${target.pathname}`)),
-          onerror: () => reject(new RetryableError(`请求失败：${target.pathname}`)),
-          onabort: () => reject(new RetryableError(`请求已取消：${target.pathname}`)),
-        });
-      });
+      return shouldUseNativeRequest()
+        ? requestTextWithFetch(target, referer)
+        : requestTextWithGM(target, referer);
     }
     function parseHtml(html) { return new DOMParser().parseFromString(html, 'text/html'); }
 
@@ -1311,6 +1363,49 @@
 
       scan(contentEl);
       return floors;
+    }
+
+    // V2EX 原生 replyOne() 只会在输入框里写入“@用户名 ”。在捕获阶段记住
+    // 点击前的内容，等原生 onclick 执行完后，再只改写它刚追加的那段，得到
+    // “@用户名 #楼层号 ”；这样不会误改用户已经输入的正文。
+    function initReplyFloorReference() {
+      if (document._v2ReplyFloorBound) return;
+      document._v2ReplyFloorBound = true;
+
+      document.addEventListener('click', event => {
+        const button = event.target.closest?.('[onclick*="replyOne("]');
+        if (!button) return;
+
+        const cell = button.closest('div.cell[id^="r_"]');
+        const input = document.getElementById('reply_content');
+        const memberName = (cell?.querySelector('strong a[href*="/member/"]')?.textContent || '').trim();
+        const floorNum = Number((cell?.querySelector('.no')?.textContent || '').match(/\d+/)?.[0]);
+        if (!cell || !input || !memberName || !Number.isSafeInteger(floorNum)) return;
+
+        const before = input.value;
+        const nativePrefix = `@${memberName} `;
+        const floorPrefix = `@${memberName} #${floorNum} `;
+
+        queueMicrotask(() => {
+          if (!input.isConnected) return;
+          const current = input.value;
+          let next = null;
+
+          if (!before && current === nativePrefix) {
+            next = floorPrefix;
+          } else if (before && current === `${before}\n${nativePrefix}`) {
+            next = `${before}\n${floorPrefix}`;
+          } else if (before === nativePrefix && !current) {
+            // 原生逻辑在输入框恰好等于同一个 @ 前缀时会清空内容。
+            next = floorPrefix;
+          }
+
+          if (next === null) return;
+          input.value = next;
+          input.focus();
+          input.setSelectionRange?.(next.length, next.length);
+        });
+      }, true);
     }
 
     // ── 解析单条回复 ──
@@ -1920,6 +2015,7 @@
     // ── 主流程 ──
     async function init() {
       if (!isTopicPage()) return;
+      initReplyFloorReference();
       const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
       if (!topicId) return;
 
