@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.4
+// @version      2.5.5
 // @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -21,11 +21,16 @@
 // @connect      www.v2ex.com
 // @connect      edge.v2ex.com
 // @run-at       document-end
+// @noframes
 // @license      MIT
 // ==/UserScript==
 
 (() => {
   'use strict';
+
+  // 某些 Safari 脚本管理器不识别 @noframes；运行时再兜底一次，避免
+  // 签到用的隐藏 iframe 重复启动整套增强脚本或抢占签到锁。
+  if (window.top !== window.self) return;
 
   // =========================
   // 0) 统一配置
@@ -909,9 +914,9 @@
     let retryTimer = 0;
     let networkFailures = 0;
 
-    function shouldUseNativeRequest() {
+    function isSafari() {
       // Safari 不允许扩展后台请求改写 Referer；V2EX 领取接口又会
-      // 校验该字段。改用页面同源 fetch，由 WebKit 带上登录 Cookie 和正确来源。
+      // 校验该字段，需要走真实的同源页面跳转。
       return /AppleWebKit/i.test(navigator.userAgent) && /Apple Computer/i.test(navigator.vendor || '');
     }
 
@@ -989,7 +994,7 @@
     function requestText(url, referer) {
       const target = new URL(url, location.origin);
       if (target.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
-      return shouldUseNativeRequest()
+      return isSafari()
         ? requestTextWithFetch(target, referer)
         : requestTextWithGM(target, referer);
     }
@@ -1051,6 +1056,113 @@
       return target;
     }
 
+    function claimWithDailyFrame(page) {
+      const dailyUrl = new URL(page, location.origin);
+      if (dailyUrl.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
+
+      return new Promise((resolve, reject) => {
+        const frame = document.createElement('iframe');
+        frame.dataset.v2exDailyFrame = '1';
+        frame.hidden = true;
+        frame.setAttribute('aria-hidden', 'true');
+        frame.title = 'V2EX 每日签到';
+
+        let stage = 'daily';
+        let settled = false;
+        let verifyTimer = 0;
+        let verifyAttempts = 0;
+
+        const cleanup = () => {
+          clearTimeout(timeoutTimer);
+          clearTimeout(verifyTimer);
+          frame.remove();
+        };
+        const finish = (status, error = null) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (error) reject(error);
+          else resolve(status);
+        };
+        const timeoutTimer = setTimeout(() => {
+          finish(null, new RetryableError('Safari 页面跳转签到超时'));
+        }, CONFIG.daily.requestTimeoutMs * Math.max(3, CONFIG.daily.verifyRetries + 2));
+        const scheduleVerification = () => {
+          stage = 'verify-wait';
+          verifyTimer = setTimeout(() => {
+            if (settled) return;
+            stage = 'verify';
+            frame.src = dailyUrl.href;
+          }, CONFIG.daily.verifyIntervalMs);
+        };
+
+        frame.addEventListener('load', () => {
+          if (settled) return;
+
+          let doc;
+          let finalUrl;
+          try {
+            doc = frame.contentDocument;
+            finalUrl = frame.contentWindow?.location?.href || frame.src;
+          } catch (_) {
+            finish(null, new RetryableError('Safari 无法访问签到页面'));
+            return;
+          }
+          if (!doc || finalUrl === 'about:blank') return;
+
+          if (isSignedOut(doc, finalUrl)) {
+            finish('signed-out');
+            return;
+          }
+          if (REJECTED_RE.test(pageText(doc))) {
+            finish(null, new Error('V2EX 拒绝了当前浏览器环境'));
+            return;
+          }
+          if (alreadyRedeemed(doc)) {
+            finish(stage === 'daily' ? 'already-claimed' : 'claimed');
+            return;
+          }
+
+          if (stage === 'daily') {
+            const redeemUrl = findRedeemUrl(doc);
+            if (!redeemUrl) {
+              finish(null, new Error('未找到领取按钮（页面结构可能已变更）'));
+              return;
+            }
+
+            let target;
+            try { target = validateRedeemUrl(redeemUrl); }
+            catch (error) { finish(null, error); return; }
+
+            // 在真实的 /mission/daily 文档里点击链接，让 WebKit 自然生成
+            // Referer 和第一方 Cookie；RequestInit.referrer 在 Safari 扩展里会被忽略。
+            stage = 'redeem';
+            const link = doc.createElement('a');
+            link.href = target.href;
+            link.hidden = true;
+            (doc.body || doc.documentElement).appendChild(link);
+            link.click();
+            return;
+          }
+
+          if (stage === 'redeem') {
+            // 领取接口通常跳到 /balance；等该导航完成后回任务页做服务端确认。
+            scheduleVerification();
+            return;
+          }
+
+          if (stage === 'verify') {
+            verifyAttempts++;
+            if (verifyAttempts < Math.max(1, CONFIG.daily.verifyRetries)) scheduleVerification();
+            else finish(null, new RetryableError('领取请求已发送，但服务端未确认成功'));
+          }
+        });
+
+        frame.src = dailyUrl.href;
+        (document.body || document.documentElement).appendChild(frame);
+      });
+    }
+
     async function verifyClaimed(page, retries, intervalMs) {
       let lastStatus = 'unknown';
       for (let attempt = 0; attempt < retries; attempt++) {
@@ -1085,6 +1197,14 @@
         await sleep(randInt(delayMinMs, delayMaxMs));
         // 等待期间可能已被其它标签页完成
         if (GM.get(storeKey, '') === today) return 'already-done';
+
+        // Safari / wBlock Scripts 的后台请求与普通 fetch 都不能可靠地产生
+        // V2EX 要求的任务页 Referer，因此改用隐藏的同源页面完成真实导航。
+        if (isSafari()) {
+          const status = await claimWithDailyFrame(page);
+          if (status === 'claimed' || status === 'already-claimed') GM.set(storeKey, today);
+          return status;
+        }
 
         const daily = await loadPage(page, location.href);
         if (isSignedOut(daily.doc, daily.finalUrl)) return 'signed-out';
