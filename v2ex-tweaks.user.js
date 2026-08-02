@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.5
+// @version      2.5.6
 // @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -1487,7 +1487,9 @@
 
     // V2EX 原生 replyOne() 只会在输入框里写入“@用户名 ”。在捕获阶段记住
     // 点击前的内容，等原生 onclick 执行完后，再只改写它刚追加的那段，得到
-    // “@用户名 #楼层号 ”；这样不会误改用户已经输入的正文。
+    // “@用户名 #楼层号 ”；这样不会误改用户已经输入的正文。这里必须用下一轮
+    // task，不能用微任务：浏览器可能在捕获监听器结束后、目标 onclick 执行前
+    // 就清空微任务队列，导致过早检查输入框而漏掉本次回复。
     function initReplyFloorReference() {
       if (document._v2ReplyFloorBound) return;
       document._v2ReplyFloorBound = true;
@@ -1506,7 +1508,7 @@
         const nativePrefix = `@${memberName} `;
         const floorPrefix = `@${memberName} #${floorNum} `;
 
-        queueMicrotask(() => {
+        setTimeout(() => {
           if (!input.isConnected) return;
           const current = input.value;
           let next = null;
@@ -1524,7 +1526,7 @@
           input.value = next;
           input.focus();
           input.setSelectionRange?.(next.length, next.length);
-        });
+        }, 0);
       }, true);
     }
 
