@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.6
-// @description  V2EX 日常增强：用户标签（本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.7
+// @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -13,7 +13,6 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
-// @grant        GM_registerMenuCommand
 // @grant        GM_notification
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -54,11 +53,12 @@
       notify: true,
     },
     tags: {
-      storeKey: 'v2ex_user_tags_v1',
+      storeKey: 'v2ex_user_tags_v2',
       maxTagLength: 24,
+      maxTagsPerUser: 12,
       // 墓碑保留时长：超过该时长的删除记录在合并时被清理
       tombstoneTtlMs: 180 * 24 * 60 * 60 * 1000,
-      exportVersion: 1,
+      exportVersion: 2,
     },
     b64: {
       minLen: 8,
@@ -164,9 +164,6 @@
       } catch (_) {}
       window.addEventListener('storage', e => { if (e.key === key) handler(undefined); });
     },
-    menu(label, handler) {
-      try { if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand(label, handler); } catch (_) {}
-    },
   };
 
   // #rrggbb → [r, g, b]，解析不出来时返回 null 交给调用方决定退路
@@ -240,7 +237,7 @@
     /* ── 胶囊 ──
        圆角药丸 + 前导圆点。同为药丸形的还有右端的楼层号，但一紫一蓝、
        一个贴用户名一个贴行右缘，位置和颜色都分得开 */
-    .v2t-slot { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; margin-left: 6px; }
+    .v2t-slot { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; vertical-align: middle; margin-left: 6px; }
     .v2t-chip {
       display: inline-flex; align-items: center; max-width: 160px;
       padding: 0 8px 0 6px; height: 17px; line-height: 17px;
@@ -254,7 +251,7 @@
     .v2t-chip::before {
       content: ''; flex: none;
       width: 4px; height: 4px; margin-right: 5px;
-      border-radius: 50%; background: currentColor; opacity: 0.8;
+      border-radius: 50%; background: var(--v2t-chip-dot, currentColor); opacity: 0.9;
     }
     .v2t-chip:hover { filter: brightness(0.94); }
     .v2t-chip:active { transform: scale(0.96); }
@@ -285,7 +282,8 @@
 
     /* ── 编辑气泡 ── */
     #v2t-editor {
-      position: fixed; z-index: 100001; width: 268px;
+      position: fixed; z-index: 100001; box-sizing: border-box;
+      width: min(356px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto;
       background: var(--v2t-surface); color: var(--v2t-text);
       border: 1px solid var(--v2t-border); border-radius: 10px;
       box-shadow: var(--v2t-shadow); padding: 12px;
@@ -311,24 +309,16 @@
       border-color: var(--v2t-accent);
       box-shadow: 0 0 0 3px var(--v2t-accent-soft);
     }
-    /* 配色默认收起：常规流程是"输入 → 回车"，不必先挑颜色 */
-    #v2t-editor .v2t-color-toggle {
-      display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
-      font-size: 11px; color: var(--v2t-text-dim); cursor: pointer; user-select: none;
+    #v2t-editor .v2t-tag-list { display: flex; flex-direction: column; gap: 7px; }
+    #v2t-editor .v2t-tag-row { display: grid; grid-template-columns: minmax(0, 1fr) 30px 24px; gap: 7px; align-items: center; }
+    #v2t-editor .v2t-tag-remove {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px;
+      background: transparent; color: var(--v2t-text-dim); cursor: pointer; font-size: 17px;
     }
-    #v2t-editor .v2t-color-toggle:hover { color: var(--v2t-accent); }
-    #v2t-editor .v2t-color-toggle .v2t-color-preview {
-      width: 10px; height: 10px; border-radius: 50%; flex: none;
-    }
-    #v2t-editor .v2t-swatches { display: none; gap: 6px; margin: 8px 0 2px; }
-    #v2t-editor .v2t-swatches.open { display: flex; }
-    #v2t-editor .v2t-swatch {
-      width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
-      border: 2px solid transparent; background-clip: padding-box;
-      transition: transform 0.12s;
-    }
-    #v2t-editor .v2t-swatch:hover { transform: scale(1.12); }
-    #v2t-editor .v2t-swatch.selected { box-shadow: 0 0 0 2px var(--v2t-surface), 0 0 0 4px currentColor; }
+    #v2t-editor .v2t-tag-remove:hover { color: #e0483a; background: rgba(224, 72, 58, 0.08); }
+    #v2t-editor .v2t-add-row { margin-top: 8px; padding: 0; border: 0; background: transparent; color: var(--v2t-accent); font: 12px var(--v2t-font); cursor: pointer; }
+    #v2t-editor .v2t-add-row:disabled { color: var(--v2t-text-dim); cursor: default; }
     #v2t-editor .v2t-recent { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
     #v2t-editor .v2t-recent-item {
       font-size: 11px; padding: 1px 7px; border-radius: 4px; cursor: pointer;
@@ -353,6 +343,118 @@
     .v2t-btn.danger { color: #e0483a; }
     .v2t-btn.danger:hover { background: rgba(224, 72, 58, 0.08); border-color: rgba(224, 72, 58, 0.4); }
 
+    /* ── 标签颜色：Path 式偏心短弧 ──
+       中心保留当前颜色；点击后 8 个固定色位沿上方短弧弹开。候选色不再因
+       当前颜色变化而换位，也不做全包围圆或横向面板。弧层挂在 body 上，
+       因此不会被编辑气泡、批量栏或管理面板的 overflow 裁切。 */
+    .v2t-color-picker {
+      position: relative; width: 30px; height: 30px; flex: 0 0 30px;
+      display: inline-flex; align-items: center; justify-content: center;
+      isolation: isolate;
+    }
+    .v2t-color-current,
+    .v2t-color-option {
+      box-sizing: border-box; padding: 0; cursor: pointer;
+      appearance: none; -webkit-appearance: none; touch-action: manipulation;
+      font-family: var(--v2t-font);
+    }
+    .v2t-color-current {
+      position: relative; z-index: 3; width: 30px; height: 30px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid transparent; border-radius: 50%;
+      background: transparent; color: #fff; box-shadow: none;
+      transition: transform 180ms cubic-bezier(.2, .9, .2, 1),
+                  background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+    }
+    .v2t-color-current::before {
+      content: ''; width: 21px; height: 21px; border-radius: 50%;
+      background: var(--v2t-swatch, #9b6cf2);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24),
+                  0 1px 3px rgba(18, 24, 40, 0.18),
+                  0 0 0 1px rgba(18, 24, 40, 0.10);
+    }
+    .v2t-color-current::after {
+      content: '×'; position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 14px; line-height: 1; font-weight: 700;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.38);
+      opacity: 0; transform: rotate(-45deg) scale(0.5);
+      transition: opacity 120ms ease, transform 180ms cubic-bezier(.2, .9, .2, 1);
+      pointer-events: none;
+    }
+    .v2t-color-current:hover { background: var(--v2t-surface-2); }
+    .v2t-color-current:active { transform: scale(0.90); }
+    .v2t-color-picker.open .v2t-color-current {
+      transform: scale(0.91); background: var(--v2t-accent-soft);
+      border-color: rgba(139, 69, 201, 0.22);
+      box-shadow: 0 0 0 3px rgba(139, 69, 201, 0.08);
+    }
+    .v2t-color-picker.open .v2t-color-current::after {
+      opacity: 0.96; transform: rotate(0) scale(1);
+    }
+    .v2t-color-current:focus-visible,
+    .v2t-color-option:focus-visible { outline: 2px solid var(--v2t-accent); outline-offset: 3px; }
+    .v2t-color-orbit {
+      position: fixed; left: 0; top: 0; z-index: 100003;
+      width: 1px; height: 1px; overflow: visible; pointer-events: none;
+      --v2t-orbit-surface: rgba(255, 255, 255, 0.93);
+      --v2t-orbit-ring: #fff;
+      --v2t-orbit-shadow: 0 5px 15px rgba(24, 30, 45, 0.16),
+                          0 0 0 1px rgba(24, 30, 45, 0.07);
+    }
+    .v2t-color-option {
+      position: absolute; left: 0; top: 0; width: 30px; height: 30px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 0; border-radius: 50%; background: var(--v2t-orbit-surface);
+      box-shadow: var(--v2t-orbit-shadow);
+      opacity: 0; pointer-events: none;
+      transform: translate(-50%, -50%) scale(0.38);
+      transition: transform 125ms cubic-bezier(.4, 0, .6, 1), opacity 70ms ease;
+      will-change: transform, opacity;
+    }
+    .v2t-color-option::before {
+      content: ''; width: 20px; height: 20px; border-radius: 50%;
+      background: var(--v2t-swatch);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.23),
+                  0 0 0 1px rgba(18, 24, 40, 0.08);
+      transition: transform 110ms ease, filter 110ms ease;
+    }
+    .v2t-color-orbit.open .v2t-color-option {
+      opacity: 1; pointer-events: auto;
+      transform: translate(calc(-50% + var(--v2t-x)), calc(-50% + var(--v2t-y))) scale(1);
+      transition-duration: 225ms, 95ms;
+      transition-timing-function: cubic-bezier(.18, .89, .28, 1.22), ease;
+      transition-delay: calc(var(--v2t-seq) * 7ms), calc(var(--v2t-seq) * 4ms);
+    }
+    .v2t-color-option:hover::before,
+    .v2t-color-option:focus-visible::before { transform: scale(1.12); filter: brightness(1.04); }
+    .v2t-color-option[aria-selected="true"] {
+      box-shadow: var(--v2t-orbit-shadow),
+                  0 0 0 2px var(--v2t-orbit-ring),
+                  0 0 0 4px var(--v2t-swatch);
+    }
+    .v2t-color-option[aria-selected="true"]::after {
+      content: '✓'; position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 11px; line-height: 1; font-weight: 800;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.40); pointer-events: none;
+    }
+    :root:has(#Wrapper.Night) .v2t-color-orbit {
+      --v2t-orbit-surface: rgba(43, 46, 53, 0.96);
+      --v2t-orbit-ring: #23252b;
+      --v2t-orbit-shadow: 0 6px 18px rgba(0, 0, 0, 0.36),
+                          0 0 0 1px rgba(255, 255, 255, 0.08);
+    }
+    :root:has(#Wrapper.Night) .v2t-color-current::before,
+    :root:has(#Wrapper.Night) .v2t-color-option::before {
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+                  0 0 0 1px rgba(255, 255, 255, 0.07);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .v2t-color-current, .v2t-color-current::after,
+      .v2t-color-option, .v2t-color-option::before { transition: none !important; }
+    }
+
     /* ── 管理面板 ── */
     #v2t-manager {
       position: fixed; inset: 0; z-index: 100000;
@@ -362,6 +464,11 @@
       font-family: var(--v2t-font);
     }
     #v2t-manager.active { opacity: 1; visibility: visible; }
+    #v2t-manager.embedded {
+      position: static; inset: auto; z-index: auto;
+      display: block; opacity: 1; visibility: visible;
+      background: transparent; backdrop-filter: none; transition: none;
+    }
     #v2t-manager .v2t-panel {
       width: min(680px, 92vw); max-height: min(76vh, 720px);
       display: flex; flex-direction: column;
@@ -371,6 +478,10 @@
       overflow: hidden;
     }
     #v2t-manager.active .v2t-panel { transform: none; }
+    #v2t-manager.embedded .v2t-panel {
+      width: 100%; max-height: none; border-radius: 0; box-shadow: none;
+      transform: none; transition: none; overflow: visible;
+    }
     #v2t-manager .v2t-panel-head {
       display: flex; align-items: center; gap: 10px;
       padding: 14px 16px; border-bottom: 1px solid var(--v2t-border);
@@ -385,6 +496,7 @@
     }
     #v2t-manager .v2t-search:focus { border-color: var(--v2t-accent); }
     #v2t-manager .v2t-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+    #v2t-manager.embedded .v2t-list { overflow: visible; }
     #v2t-manager .v2t-row {
       display: flex; align-items: center; gap: 10px;
       padding: 8px 16px; border-bottom: 1px solid var(--v2t-border);
@@ -393,12 +505,31 @@
     #v2t-manager .v2t-row:hover { background: var(--v2t-surface-2); }
     #v2t-manager .v2t-row a.v2t-user { color: var(--v2t-text); font-size: 13px; text-decoration: none; font-weight: 500; }
     #v2t-manager .v2t-row a.v2t-user:hover { color: var(--v2t-accent); }
+    #v2t-manager .v2t-row .v2t-slot { max-width: 310px; }
     #v2t-manager .v2t-row .v2t-time { margin-left: auto; font-size: 11px; color: var(--v2t-text-dim); font-variant-numeric: tabular-nums; }
     #v2t-manager .v2t-row .v2t-row-act {
       font-size: 11px; color: var(--v2t-text-dim); cursor: pointer; padding: 2px 4px; border-radius: 4px;
     }
     #v2t-manager .v2t-row .v2t-row-act:hover { color: var(--v2t-accent); background: var(--v2t-surface); }
     #v2t-manager .v2t-row .v2t-row-act.danger:hover { color: #e0483a; }
+    #v2t-manager .v2t-inline-editor { width: 100%; }
+    #v2t-manager .v2t-inline-editor-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; font-size: 13px; }
+    #v2t-manager .v2t-inline-tag-list { display: flex; flex-direction: column; gap: 7px; }
+    #v2t-manager .v2t-inline-tag-row { display: grid; grid-template-columns: minmax(0, 1fr) 30px 24px; gap: 7px; align-items: center; }
+    #v2t-manager .v2t-inline-tag-row input {
+      box-sizing: border-box; width: 100%; height: 29px; padding: 0 7px;
+      border: 1px solid var(--v2t-border); border-radius: 5px;
+      background: var(--v2t-surface); color: var(--v2t-text); font: 12px var(--v2t-font); outline: none;
+    }
+    #v2t-manager .v2t-inline-tag-row input:focus { border-color: var(--v2t-accent); }
+    #v2t-manager .v2t-inline-remove {
+      width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px;
+      background: transparent; color: var(--v2t-text-dim); font-size: 17px; cursor: pointer;
+    }
+    #v2t-manager .v2t-inline-remove:hover { color: #e0483a; background: rgba(224, 72, 58, 0.08); }
+    #v2t-manager .v2t-inline-add { margin-top: 7px; padding: 0; border: 0; background: transparent; color: var(--v2t-accent); font: 12px var(--v2t-font); cursor: pointer; }
+    #v2t-manager .v2t-inline-actions { display: flex; gap: 7px; justify-content: flex-end; margin-top: 10px; }
+    #v2t-manager.embedded .v2t-row { flex-wrap: wrap; }
     #v2t-manager .v2t-empty { padding: 48px 16px; text-align: center; color: var(--v2t-text-dim); font-size: 13px; }
     #v2t-manager .v2t-panel-foot {
       display: flex; align-items: center; gap: 8px;
@@ -785,15 +916,20 @@
       pointer-events: none;
     }
 
-    /* ===== 高赞阅览室 ===== */
-    #v2ex-hot-btn {
-      display: inline-block; margin-left: 10px;
-      padding: 2px 10px; background-color: #f0f2f5; color: #ccc;
-      border-radius: 12px; font-size: 12px; cursor: pointer;
-      transition: all 0.2s ease; line-height: 1.5;
-      border: 1px solid transparent;
+    /* ===== 主题操作：批量标签 / 高赞阅览室 ===== */
+    .v2t-bulk-panel {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+      font-family: var(--v2t-font); color: var(--v2t-text);
     }
-    #v2ex-hot-btn:hover { background-color: #e3e8f0; color: #555; border-color: #ccc; }
+    .v2t-bulk-panel .v2t-bulk-count { color: var(--v2t-text-dim); font-size: 12px; white-space: nowrap; }
+    .v2t-bulk-panel input {
+      box-sizing: border-box; height: 28px; padding: 0 8px;
+      border: 1px solid var(--v2t-border); border-radius: 5px;
+      background: var(--v2t-surface); color: var(--v2t-text); font: 12px var(--v2t-font); outline: none;
+    }
+    .v2t-bulk-panel input { width: 150px; }
+    .v2t-bulk-panel input:focus { border-color: var(--v2t-accent); }
+    .v2t-bulk-panel .v2t-color-picker { margin: -2px 2px; }
 
     #hot-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -884,8 +1020,6 @@
     #Wrapper.Night .v2-b64-actions { background: #23252b; border-color: #3a4a6d; }
     #Wrapper.Night .v2-b64-action { color: #8fabff; }
     #Wrapper.Night .v2-b64-action:hover { background: #2c3346; }
-    #Wrapper.Night #v2ex-hot-btn { background-color: #2b2e35; color: #6a707c; }
-    #Wrapper.Night #v2ex-hot-btn:hover { background-color: #343841; color: #b9bfca; border-color: #4a4e58; }
     #Wrapper.Night #hot-overlay { background: rgba(16,18,22,0.94); }
     #Wrapper.Night .hot-container { background: #23252b; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
     #Wrapper.Night .hot-card { background: #23252b; border-bottom-color: #303239; }
@@ -2411,20 +2545,122 @@
       }, 200);
     }
 
+    function extractPageUsers() {
+      const users = new Map();
+      const anchors = document.querySelectorAll([
+        '#Main .header small.gray > a[href*="/member/"]',
+        '#Main .cell[id^="r_"] strong > a[href*="/member/"]',
+      ].join(','));
+      for (const anchor of anchors) {
+        try {
+          const match = /^\/member\/([^/?#]+)/.exec(new URL(anchor.href, location.origin).pathname);
+          if (!match) continue;
+          const name = decodeURIComponent(match[1]).trim();
+          const key = name.toLowerCase();
+          if (name && !users.has(key)) users.set(key, name);
+        } catch (_) {}
+      }
+      return [...users.values()];
+    }
+
+    function toggleBulkPanel(actionBar) {
+      const existing = document.getElementById('v2t-bulk-panel');
+      if (existing) { existing.remove(); return; }
+
+      const users = extractPageUsers();
+      const panel = document.createElement('div');
+      panel.id = 'v2t-bulk-panel';
+      panel.className = 'cell v2t-bulk-panel';
+
+      const count = document.createElement('span');
+      count.className = 'v2t-bulk-count';
+      count.textContent = `${users.length} 位用户`;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = CONFIG.tags.maxTagLength;
+      input.placeholder = '标签内容';
+      input.setAttribute('aria-label', '批量添加的标签内容');
+      const colorPicker = UserTags.createColorPicker();
+      const apply = document.createElement('button');
+      apply.type = 'button';
+      apply.className = 'v2t-btn primary';
+      apply.textContent = '添加';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'v2t-btn';
+      cancel.textContent = '取消';
+      cancel.addEventListener('click', () => panel.remove());
+
+      const commit = () => {
+        const tag = input.value.replace(/\s+/g, ' ').trim();
+        if (!tag) { UserTags.toast('请先输入标签'); input.focus(); return; }
+        const latestUsers = extractPageUsers();
+        const stats = UserTags.bulkAdd(latestUsers, tag, colorPicker.dataset.color);
+        const details = [
+          `已添加 ${stats.added}`,
+          stats.already ? `重复 ${stats.already}` : '',
+          stats.full ? `已满 ${stats.full}` : '',
+        ].filter(Boolean).join(' · ');
+        UserTags.toast(`${tag}：${details}`);
+        if (stats.added) {
+          input.value = '';
+          input.focus();
+        }
+      };
+      apply.addEventListener('click', commit);
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); commit(); }
+        else if (event.key === 'Escape') panel.remove();
+      });
+
+      panel.append(count, input, colorPicker, apply, cancel);
+      actionBar.insertAdjacentElement('afterend', panel);
+      input.focus();
+    }
+
+    function openHotRoom() {
+      const overlay = buildUI(extractComments());
+      requestAnimationFrame(() => overlay.classList.add('active'));
+    }
+
     function boot() {
       if (!isTopicPage()) return;
       setTimeout(() => {
-        const target = document.querySelector('#Main .header h1') || document.querySelector('#Main .box .header');
-        if (target && !document.getElementById('v2ex-hot-btn')) {
-          const btn = document.createElement('span');
-          btn.id = 'v2ex-hot-btn'; btn.textContent = '高赞';
-          btn.addEventListener('click', e => {
-            e.preventDefault(); e.stopPropagation();
-            const overlay = buildUI(extractComments());
-            requestAnimationFrame(() => overlay.classList.add('active'));
-          });
-          target.appendChild(btn);
-        }
+        const topicBox = document.querySelector('#Main > .box');
+        const actionBar = topicBox?.querySelector('.topic_buttons');
+        const thankSlot = actionBar?.querySelector('#topic_thank');
+        const thank = thankSlot?.querySelector('a')
+          || [...(actionBar?.querySelectorAll('a') || [])].find(anchor => anchor.textContent.trim() === '感谢');
+        if (!actionBar || document.getElementById('v2ex-bulk-btn')) return;
+
+        const bulk = document.createElement('a');
+        bulk.id = 'v2ex-bulk-btn';
+        bulk.className = thank?.className || 'tb';
+        bulk.href = '#;';
+        bulk.textContent = '加标签';
+        bulk.title = '给当前主题中的全部用户添加同一个标签';
+        bulk.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleBulkPanel(actionBar);
+        });
+
+        const hot = document.createElement('a');
+        hot.id = 'v2ex-hot-btn';
+        hot.className = thank?.className || 'tb';
+        hot.href = '#;';
+        hot.textContent = '高赞';
+        hot.title = '查看高赞回复';
+        hot.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openHotRoom();
+        });
+
+        const nodes = [document.createTextNode('\u00a0 \u00a0'), bulk,
+          document.createTextNode('\u00a0 \u00a0'), hot];
+        if (thankSlot) thankSlot.after(...nodes);
+        else actionBar.append(...nodes);
       }, 500);
     }
 
@@ -2579,22 +2815,257 @@
   // 9) 功能G：用户标签（本地存储 / 导入导出 / 合并）
   // =========================
   const UserTags = (() => {
-    const { storeKey, maxTagLength, tombstoneTtlMs, exportVersion } = CONFIG.tags;
+    const { storeKey, maxTagLength, maxTagsPerUser, tombstoneTtlMs, exportVersion } = CONFIG.tags;
 
-    // 主色（紫）排第一并作为默认值：不选颜色也能得到一致好看的标签。
-    // 整套配色刻意不含 #4a7af0 —— 那是 NEW / 引用 / b64 的系统蓝，
-    // 允许用户选到它就等于允许把"人的标签"伪装成"系统状态"。
+    // 色点与标签文字色分离：候选色可以更明快，标签正文仍使用满足小字号
+    // 可读性的深色 ink。保留全部旧 key 与存储结构，已有标签无需迁移。
     const COLORS = [
-      { key: 'violet', hex: '#8b45c9', label: '默认紫' },
-      { key: 'teal',   hex: '#0e8f8f', label: '青' },
-      { key: 'green',  hex: '#2f8f4e', label: '绿' },
-      { key: 'amber',  hex: '#b5730b', label: '琥珀' },
-      { key: 'red',    hex: '#cf3b30', label: '红' },
-      { key: 'pink',   hex: '#c72d78', label: '粉' },
-      { key: 'slate',  hex: '#5f6b7a', label: '灰蓝' },
+      { key: 'violet', swatch: '#9b6cf2', ink: '#6d3fc0', label: '柔紫' },
+      { key: 'indigo', swatch: '#657ce8', ink: '#4658b5', label: '靛蓝' },
+      { key: 'teal',   swatch: '#2da79b', ink: '#1f756f', label: '湖青' },
+      { key: 'green',  swatch: '#71ad55', ink: '#4c783a', label: '草绿' },
+      { key: 'amber',  swatch: '#d69a3a', ink: '#95601b', label: '琥珀' },
+      { key: 'red',    swatch: '#ea735f', ink: '#ab493d', label: '珊瑚' },
+      { key: 'pink',   swatch: '#dd668b', ink: '#a94467', label: '莓粉' },
+      { key: 'slate',  swatch: '#8792a3', ink: '#5f6876', label: '雾灰' },
     ];
-    const COLOR_MAP = new Map(COLORS.map(c => [c.key, c.hex]));
+    const COLOR_MAP = new Map(COLORS.map(color => [color.key, color]));
     const DEFAULT_COLOR = 'violet';
+
+    // 固定色位很重要：若每次把当前颜色从候选数组里删掉，剩余颜色会整体换位，
+    // 用户会觉得颜色在“乱跑”。这里按视觉色相固定为一条短弧，当前色只加选中环。
+    const COLOR_ORBIT_KEYS = ['slate', 'teal', 'indigo', 'violet', 'pink', 'red', 'amber', 'green'];
+    const COLOR_ORBIT_RADIUS = 74;
+    const COLOR_ORBIT_SPREAD = Math.PI * 156 / 180;
+    const COLOR_ORBIT_BIAS_X = -16;
+    const COLOR_OPTION_RADIUS = 15;
+    const COLOR_ORBIT_EDGE = 8;
+
+    let colorOrbit = null;
+    let activeColorPicker = null;
+    let colorPlaceFrame = 0;
+
+    const colorItem = key => COLOR_MAP.get(key) || COLORS[0];
+
+    function scheduleColorOrbitPlace() {
+      if (colorPlaceFrame || !activeColorPicker) return;
+      colorPlaceFrame = requestAnimationFrame(() => {
+        colorPlaceFrame = 0;
+        placeColorOrbit();
+      });
+    }
+
+    function trackColorOrbit(enable) {
+      const action = enable ? 'addEventListener' : 'removeEventListener';
+      window[action]('resize', scheduleColorOrbitPlace);
+      window[action]('scroll', scheduleColorOrbitPlace, true);
+    }
+
+    function closeColorPickers() {
+      const picker = activeColorPicker;
+      if (!picker) return;
+      activeColorPicker = null;
+      picker.classList.remove('open');
+      picker.querySelector('.v2t-color-current')?.setAttribute('aria-expanded', 'false');
+      colorOrbit?.classList.remove('open');
+      colorOrbit?.setAttribute('aria-hidden', 'true');
+      colorOrbit?.querySelectorAll('.v2t-color-option').forEach(option => { option.tabIndex = -1; });
+      trackColorOrbit(false);
+      if (colorPlaceFrame) cancelAnimationFrame(colorPlaceFrame);
+      colorPlaceFrame = 0;
+    }
+
+    function refreshColorOrbit() {
+      if (!colorOrbit || !activeColorPicker) return;
+      const selected = colorItem(activeColorPicker.dataset.color);
+      colorOrbit.querySelectorAll('.v2t-color-option').forEach(option => {
+        const isSelected = option.dataset.color === selected.key;
+        option.setAttribute('aria-selected', String(isSelected));
+        option.tabIndex = isSelected ? 0 : -1;
+      });
+    }
+
+    function placeColorOrbit() {
+      if (!activeColorPicker?.isConnected || !colorOrbit?.isConnected) {
+        closeColorPickers();
+        return;
+      }
+
+      const anchor = activeColorPicker.querySelector('.v2t-color-current');
+      const rect = anchor.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const viewportW = document.documentElement.clientWidth;
+      const viewportH = document.documentElement.clientHeight;
+      const topSpace = centerY - COLOR_ORBIT_EDGE;
+      const bottomSpace = viewportH - centerY - COLOR_ORBIT_EDGE;
+      const requiredSpace = COLOR_ORBIT_RADIUS + COLOR_OPTION_RADIUS + 3;
+      const opensDown = topSpace < requiredSpace && bottomSpace > topSpace;
+      const available = opensDown ? bottomSpace : topSpace;
+      const radius = Math.max(58, Math.min(COLOR_ORBIT_RADIUS, available - COLOR_OPTION_RADIUS - 2));
+      const startAngle = -Math.PI / 2 - COLOR_ORBIT_SPREAD / 2;
+      const options = [...colorOrbit.querySelectorAll('.v2t-color-option')];
+
+      const points = options.map((_, index) => {
+        const angle = startAngle + COLOR_ORBIT_SPREAD * index / Math.max(1, options.length - 1);
+        return {
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius * (opensDown ? -1 : 1),
+        };
+      });
+
+      // 默认稍向左偏，避开右侧删除按钮；接近屏幕边缘时再整体平移，弧形不变形。
+      let shiftX = COLOR_ORBIT_BIAS_X;
+      const minX = Math.min(...points.map(point => point.x)) - COLOR_OPTION_RADIUS;
+      const maxX = Math.max(...points.map(point => point.x)) + COLOR_OPTION_RADIUS;
+      if (centerX + minX + shiftX < COLOR_ORBIT_EDGE) {
+        shiftX += COLOR_ORBIT_EDGE - (centerX + minX + shiftX);
+      }
+      if (centerX + maxX + shiftX > viewportW - COLOR_ORBIT_EDGE) {
+        shiftX -= centerX + maxX + shiftX - (viewportW - COLOR_ORBIT_EDGE);
+      }
+
+      colorOrbit.style.left = `${Math.round(centerX)}px`;
+      colorOrbit.style.top = `${Math.round(centerY)}px`;
+      colorOrbit.dataset.direction = opensDown ? 'down' : 'up';
+      points.forEach((point, index) => {
+        options[index].style.setProperty('--v2t-x', `${Math.round(point.x + shiftX)}px`);
+        options[index].style.setProperty('--v2t-y', `${Math.round(point.y)}px`);
+      });
+    }
+
+    function ensureColorOrbit() {
+      if (colorOrbit?.isConnected) return colorOrbit;
+
+      colorOrbit = document.createElement('div');
+      colorOrbit.className = 'v2t-color-orbit';
+      colorOrbit.setAttribute('role', 'listbox');
+      colorOrbit.setAttribute('aria-label', '标签颜色');
+      colorOrbit.setAttribute('aria-hidden', 'true');
+
+      const orbitColors = COLOR_ORBIT_KEYS.map(colorItem);
+      orbitColors.forEach((item, index) => {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'v2t-color-option';
+        option.dataset.color = item.key;
+        option.style.setProperty('--v2t-swatch', item.swatch);
+        // 从弧顶向两端对称展开，最大延迟不足 25ms，不形成从左到右的“贪吃蛇”。
+        option.style.setProperty('--v2t-seq', Math.abs(index - (orbitColors.length - 1) / 2));
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-label', item.label);
+        option.title = item.label;
+        option.tabIndex = -1;
+        option.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!activeColorPicker) return;
+          const returnTarget = activeColorPicker.querySelector('.v2t-color-current');
+          activeColorPicker.dataset.color = item.key;
+          activeColorPicker.style.setProperty('--v2t-swatch', item.swatch);
+          returnTarget.setAttribute('aria-label', `当前颜色：${item.label}，点击更改`);
+          returnTarget.title = item.label;
+          closeColorPickers();
+          returnTarget?.focus();
+        });
+        colorOrbit.appendChild(option);
+      });
+
+      colorOrbit.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          const returnTarget = activeColorPicker?.querySelector('.v2t-color-current');
+          closeColorPickers();
+          returnTarget?.focus();
+          return;
+        }
+
+        const options = [...colorOrbit.querySelectorAll('.v2t-color-option')];
+        const currentIndex = Math.max(0, options.indexOf(document.activeElement));
+        let nextIndex = null;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+          nextIndex = (currentIndex + 1) % options.length;
+        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+          nextIndex = (currentIndex - 1 + options.length) % options.length;
+        } else if (event.key === 'Home') {
+          nextIndex = 0;
+        } else if (event.key === 'End') {
+          nextIndex = options.length - 1;
+        } else if (event.key === 'Tab') {
+          closeColorPickers();
+          return;
+        }
+        if (nextIndex === null) return;
+        event.preventDefault();
+        options[nextIndex].focus();
+      });
+
+      document.body.appendChild(colorOrbit);
+      return colorOrbit;
+    }
+
+    function openColorPicker(wrapper, focusSelected = false) {
+      if (activeColorPicker === wrapper) {
+        if (focusSelected) {
+          refreshColorOrbit();
+          colorOrbit?.querySelector('[aria-selected="true"]')?.focus();
+        } else {
+          closeColorPickers();
+        }
+        return;
+      }
+
+      closeColorPickers();
+      ensureColorOrbit();
+      activeColorPicker = wrapper;
+      wrapper.classList.add('open');
+      wrapper.querySelector('.v2t-color-current')?.setAttribute('aria-expanded', 'true');
+      refreshColorOrbit();
+      placeColorOrbit();
+      colorOrbit.setAttribute('aria-hidden', 'false');
+      // 先落坐标、下一帧再展开，确保每颗颜色都真正从中心出发。
+      requestAnimationFrame(() => {
+        if (activeColorPicker !== wrapper) return;
+        colorOrbit.classList.add('open');
+        placeColorOrbit();
+        if (focusSelected) colorOrbit.querySelector('[aria-selected="true"]')?.focus();
+      });
+      trackColorOrbit(true);
+    }
+
+    function createColorPicker(initialColor = DEFAULT_COLOR) {
+      const wrapper = document.createElement('span');
+      wrapper.className = 'v2t-color-picker';
+      wrapper.dataset.color = COLOR_MAP.has(initialColor) ? initialColor : DEFAULT_COLOR;
+
+      const current = document.createElement('button');
+      current.type = 'button';
+      current.className = 'v2t-color-current';
+      current.setAttribute('aria-haspopup', 'listbox');
+      current.setAttribute('aria-expanded', 'false');
+
+      const syncCurrent = () => {
+        const selected = colorItem(wrapper.dataset.color);
+        wrapper.style.setProperty('--v2t-swatch', selected.swatch);
+        current.setAttribute('aria-label', `当前颜色：${selected.label}，点击更改`);
+        current.title = selected.label;
+      };
+
+      current.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openColorPicker(wrapper);
+      });
+      current.addEventListener('keydown', event => {
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+        event.preventDefault();
+        openColorPicker(wrapper, true);
+      });
+
+      syncCurrent();
+      wrapper.appendChild(current);
+      return wrapper;
+    }
 
     // 会员链接出现的位置。.topic_info 那条覆盖所有主题列表页——首页、节点页、
     // /recent、/my/topics、个人主页——里面的作者和"最后回复来自"两个用户名；
@@ -2608,23 +3079,39 @@
     ].join(',');
 
     // ── 存储层 ──
-    // 结构：{ v, tags: { <小写用户名>: {name, tag, color, updatedAt} }, deleted: { <小写用户名>: ts } }
+    // 结构：{ v:2, tags: { <小写用户名>: {name, tags:[{tag,color}], updatedAt} }, deleted: { <小写用户名>: ts } }
     // deleted 是墓碑，保证"删除"在跨浏览器合并时也能正确传播（否则旧数据会把删掉的标签复活）。
     let store = null;
 
     const emptyStore = () => ({ v: exportVersion, tags: {}, deleted: {} });
     const keyOf = name => String(name ?? '').trim().toLowerCase();
 
-    function sanitizeEntry(raw, fallbackName) {
+    function sanitizeTag(raw) {
       if (!raw || typeof raw !== 'object') return null;
       const tag = typeof raw.tag === 'string' ? raw.tag.replace(/\s+/g, ' ').trim().slice(0, maxTagLength) : '';
       if (!tag) return null;
+      return { tag, color: COLOR_MAP.has(raw.color) ? raw.color : DEFAULT_COLOR };
+    }
+
+    function sanitizeEntry(raw, fallbackName) {
+      if (!raw || typeof raw !== 'object') return null;
       const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : String(fallbackName ?? '').trim();
-      const updatedAt = Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 ? raw.updatedAt : 0;
+      const source = Array.isArray(raw.tags) ? raw.tags : [];
+      const tags = [];
+      const seen = new Set();
+      for (const item of source) {
+        const clean = sanitizeTag(item);
+        const key = clean?.tag.toLocaleLowerCase();
+        if (!clean || seen.has(key)) continue;
+        seen.add(key);
+        tags.push(clean);
+        if (tags.length >= maxTagsPerUser) break;
+      }
+      if (!tags.length) return null;
+      const updatedAt = Number.isFinite(Number(raw.updatedAt)) && Number(raw.updatedAt) > 0 ? Number(raw.updatedAt) : 0;
       return {
-        name: name || tag,
-        tag,
-        color: COLOR_MAP.has(raw.color) ? raw.color : DEFAULT_COLOR,
+        name: name || String(fallbackName || tags[0].tag),
+        tags,
         updatedAt,
       };
     }
@@ -2667,11 +3154,11 @@
 
     const get = name => load().tags[keyOf(name)] || null;
 
-    function setTag(name, tag, color) {
+    function setTags(name, tags) {
       const key = keyOf(name);
       if (!key) return false;
-      const entry = sanitizeEntry({ name, tag, color, updatedAt: Date.now() }, name);
-      if (!entry) return removeTag(name);
+      const entry = sanitizeEntry({ name, tags, updatedAt: Date.now() }, name);
+      if (!entry) return removeTags(name);
       const next = { v: exportVersion, tags: { ...load().tags }, deleted: { ...load().deleted } };
       next.tags[key] = entry;
       delete next.deleted[key];
@@ -2679,7 +3166,7 @@
       return true;
     }
 
-    function removeTag(name) {
+    function removeTags(name) {
       const key = keyOf(name);
       const current = load();
       if (!key || !current.tags[key]) return false;
@@ -2688,6 +3175,43 @@
       next.deleted[key] = Date.now();
       persist(next);
       return true;
+    }
+
+    function bulkAdd(names, tag, color) {
+      const cleanTag = sanitizeTag({ tag, color });
+      if (!cleanTag) return { total: 0, added: 0, already: 0, full: 0 };
+      const unique = new Map();
+      for (const name of names) {
+        const key = keyOf(name);
+        if (key && !unique.has(key)) unique.set(key, String(name).trim());
+      }
+
+      const current = load();
+      const next = { v: exportVersion, tags: { ...current.tags }, deleted: { ...current.deleted } };
+      const stats = { total: unique.size, added: 0, already: 0, full: 0 };
+      const now = Date.now();
+      const tagKey = cleanTag.tag.toLocaleLowerCase();
+
+      for (const [key, name] of unique) {
+        const existing = next.tags[key];
+        if (existing?.tags.some(item => item.tag.toLocaleLowerCase() === tagKey)) {
+          stats.already++;
+          continue;
+        }
+        if (existing?.tags.length >= maxTagsPerUser) {
+          stats.full++;
+          continue;
+        }
+        next.tags[key] = {
+          name: existing?.name || name,
+          tags: [...(existing?.tags || []), { ...cleanTag }],
+          updatedAt: now,
+        };
+        delete next.deleted[key];
+        stats.added++;
+      }
+      if (stats.added) persist(next);
+      return stats;
     }
 
     function entries() {
@@ -2700,10 +3224,12 @@
     function suggestions(limit = 8) {
       const counter = new Map();
       for (const entry of Object.values(load().tags)) {
-        const item = counter.get(entry.tag) || { tag: entry.tag, count: 0, updatedAt: 0 };
-        item.count++;
-        item.updatedAt = Math.max(item.updatedAt, entry.updatedAt);
-        counter.set(entry.tag, item);
+        for (const tag of entry.tags) {
+          const item = counter.get(tag.tag) || { tag: tag.tag, color: tag.color, count: 0, updatedAt: 0 };
+          item.count++;
+          item.updatedAt = Math.max(item.updatedAt, entry.updatedAt);
+          counter.set(tag.tag, item);
+        }
       }
       return [...counter.values()]
         .sort((a, b) => b.count - a.count || b.updatedAt - a.updatedAt)
@@ -2719,26 +3245,24 @@
         version: exportVersion,
         exportedAt: Date.now(),
         count: Object.keys(current.tags).length,
+        tagCount: Object.values(current.tags).reduce((sum, entry) => sum + entry.tags.length, 0),
         tags: current.tags,
         deleted: current.deleted,
       };
     }
 
-    // 兼容三种输入：本脚本导出的完整包、只有 {tags:{…}} 的裁剪包、
-    // 以及手写的 { 用户名: "标签文本" } 简易映射。
+    // 只接受本版本导出的 v2 完整包，避免旧格式的歧义进入多标签数据。
     function parseImport(text) {
       let data;
       try { data = JSON.parse(text); }
       catch (_) { throw new Error('不是合法的 JSON 文件'); }
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('文件内容不是标签数据');
 
-      // 带信封的导出包必须走 data.tags，否则 app/kind/version 这些元字段会被当成用户名
-      const hasEnvelope = ['app', 'kind', 'version', 'exportedAt', 'count', 'tags', 'deleted']
-        .some(field => field in data);
-      if (hasEnvelope && (!data.tags || typeof data.tags !== 'object')) {
-        throw new Error('文件缺少 tags 字段');
+      if (data.app !== 'v2ex-tweaks' || data.kind !== 'user-tags' || data.version !== exportVersion) {
+        throw new Error(`只支持 V2EX Tweaks v${exportVersion} 导出的标签文件`);
       }
-      const rawTags = hasEnvelope ? data.tags : data;
+      if (!data.tags || typeof data.tags !== 'object' || Array.isArray(data.tags)) throw new Error('文件缺少 tags 字段');
+      const rawTags = data.tags;
       const rawDeleted = (data.deleted && typeof data.deleted === 'object') ? data.deleted : {};
 
       const tags = {};
@@ -2746,7 +3270,7 @@
       let invalid = 0;
       for (const [k, v] of Object.entries(rawTags)) {
         const key = keyOf(k);
-        const entry = typeof v === 'string' ? sanitizeEntry({ tag: v }, k) : sanitizeEntry(v, k);
+        const entry = sanitizeEntry(v, k);
         if (!key || !entry) { invalid++; continue; }
         if (!tags[key] || entry.updatedAt > tags[key].updatedAt) tags[key] = entry;
       }
@@ -2793,7 +3317,7 @@
       for (const [key, entry] of Object.entries(next.tags)) {
         const local = base.tags[key];
         if (!local) stats.added++;
-        else if (local.tag !== entry.tag || local.color !== entry.color) stats.updated++;
+        else if (JSON.stringify(local.tags) !== JSON.stringify(entry.tags) || local.name !== entry.name) stats.updated++;
         else stats.unchanged++;
       }
       for (const key of Object.keys(base.tags)) if (!next.tags[key]) stats.removed++;
@@ -2827,15 +3351,16 @@
     }
 
     // ── 胶囊渲染 ──
-    // 配色只有固定 7 种，六个 CSS 变量在启动时算一次拼成 cssText；
-    // 否则每画一个胶囊都要跑 6 次正则解析 + 字符串拼接，一页几百个用户名很可观。
-    const CHIP_CSS = new Map(COLORS.map(({ key, hex }) => [key, [
-      `--v2t-chip-bg:${hexToRgba(hex, 0.13)}`,
-      `--v2t-chip-fg:${hex}`,
-      `--v2t-chip-bd:${hexToRgba(hex, 0.32)}`,
-      `--v2t-chip-bg-n:${hexToRgba(hex, 0.22)}`,
-      `--v2t-chip-fg-n:${lightenHex(hex, 0.38)}`,
-      `--v2t-chip-bd-n:${hexToRgba(hex, 0.45)}`,
+    // 8 色的 CSS 变量在启动时只计算一次。swatch 负责色点/淡底，ink 负责浅色
+    // 模式下的小字号正文；这样色板不必为了文字对比度而整体变暗、变脏。
+    const CHIP_CSS = new Map(COLORS.map(({ key, swatch, ink }) => [key, [
+      `--v2t-chip-bg:${hexToRgba(swatch, 0.13)}`,
+      `--v2t-chip-fg:${ink}`,
+      `--v2t-chip-dot:${swatch}`,
+      `--v2t-chip-bd:${hexToRgba(swatch, 0.30)}`,
+      `--v2t-chip-bg-n:${hexToRgba(swatch, 0.22)}`,
+      `--v2t-chip-fg-n:${lightenHex(swatch, 0.12)}`,
+      `--v2t-chip-bd-n:${hexToRgba(swatch, 0.43)}`,
     ].join(';')]));
 
     function userFromLink(anchor) {
@@ -2850,15 +3375,19 @@
       const user = slot.dataset.user;
       const entry = get(user);
       if (entry) {
-        const chip = document.createElement('span');
-        chip.className = 'v2t-chip';
-        chip.textContent = entry.tag;
-        // 标签在楼层头部可能被省略号截断，完整文案放进 title 兜底
-        chip.title = `${entry.tag} · ${entry.name || user}\n点击编辑标签`;
-        chip.setAttribute('role', 'button');
-        chip.tabIndex = 0;
-        chip.style.cssText = CHIP_CSS.get(entry.color) || CHIP_CSS.get(DEFAULT_COLOR);
-        slot.replaceChildren(chip);
+        const fragment = document.createDocumentFragment();
+        for (const item of entry.tags) {
+          const chip = document.createElement('span');
+          chip.className = 'v2t-chip';
+          chip.textContent = item.tag;
+          // 标签在楼层头部可能被省略号截断，完整文案放进 title 兜底
+          chip.title = `${item.tag} · ${entry.name || user}\n点击管理该用户的全部标签`;
+          chip.setAttribute('role', 'button');
+          chip.tabIndex = 0;
+          chip.style.cssText = CHIP_CSS.get(item.color) || CHIP_CSS.get(DEFAULT_COLOR);
+          fragment.appendChild(chip);
+        }
+        slot.replaceChildren(fragment);
         return;
       }
       const add = document.createElement('span');
@@ -2896,14 +3425,13 @@
     const Editor = (() => {
       let el = null;
       let currentUser = '';
-      let currentColor = DEFAULT_COLOR;
       let anchorEl = null;
 
       function place() {
         if (!el || !anchorEl?.isConnected) return;
         const rect = anchorEl.getBoundingClientRect();
-        const width = el.offsetWidth || 268;
-        const height = el.offsetHeight || 180;
+        const width = el.offsetWidth || 356;
+        const height = el.offsetHeight || 220;
         const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
         const top = (window.innerHeight - rect.bottom > height + 12)
           ? rect.bottom + 8
@@ -2914,6 +3442,7 @@
 
       function close() {
         if (!el) return;
+        closeColorPickers();
         el.classList.remove('visible');
         el.style.pointerEvents = 'none';
         currentUser = '';
@@ -2939,7 +3468,6 @@
         currentUser = user;
         anchorEl = anchor;
         const existing = get(user);
-        currentColor = existing?.color || DEFAULT_COLOR;
 
         el.replaceChildren();
 
@@ -2954,63 +3482,66 @@
         }
         const nameEl = document.createElement('b');
         nameEl.textContent = user;
-        head.append(nameEl, document.createTextNode(existing ? '· 编辑标签' : '· 新建标签'));
+        head.append(nameEl, document.createTextNode(existing ? `· ${existing.tags.length} 个标签` : '· 新建标签'));
 
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.maxLength = maxTagLength;
-        input.placeholder = '例如：靠谱 / 杠精 / 同行…';
-        input.value = existing?.tag || '';
-        input.setAttribute('aria-label', `${user} 的标签`);
+        const tagList = document.createElement('div');
+        tagList.className = 'v2t-tag-list';
+        const addRowBtn = document.createElement('button');
+        addRowBtn.type = 'button';
+        addRowBtn.className = 'v2t-add-row';
+        addRowBtn.textContent = '＋ 添加一个标签';
 
-        // 配色是可选项：默认收起，只有在改过颜色的标签上才自动展开
-        const toggle = document.createElement('div');
-        toggle.className = 'v2t-color-toggle';
-        toggle.setAttribute('role', 'button');
-        const preview = document.createElement('span');
-        preview.className = 'v2t-color-preview';
-        const toggleText = document.createElement('span');
-        toggle.append(preview, toggleText);
-
-        const swatches = document.createElement('div');
-        swatches.className = 'v2t-swatches';
-
-        const syncColor = () => {
-          const hex = COLOR_MAP.get(currentColor) || COLOR_MAP.get(DEFAULT_COLOR);
-          preview.style.background = hex;
-          const name = COLORS.find(c => c.key === currentColor)?.label || '';
-          toggleText.textContent = swatches.classList.contains('open') ? '收起配色' : `配色：${name}`;
+        let commit = () => {};
+        const syncAddButton = () => {
+          const full = tagList.children.length >= maxTagsPerUser;
+          addRowBtn.disabled = full;
+          addRowBtn.textContent = full ? `最多 ${maxTagsPerUser} 个标签` : '＋ 添加一个标签';
+          place();
         };
 
-        for (const { key, hex, label } of COLORS) {
-          const dot = document.createElement('span');
-          dot.className = 'v2t-swatch' + (key === currentColor ? ' selected' : '');
-          dot.style.background = hex;
-          dot.style.color = hex;
-          dot.title = label;
-          dot.setAttribute('role', 'button');
-          dot.setAttribute('aria-label', `颜色 ${label}`);
-          dot.addEventListener('click', () => {
-            currentColor = key;
-            swatches.querySelectorAll('.v2t-swatch').forEach(s => s.classList.remove('selected'));
-            dot.classList.add('selected');
-            syncColor();
-            input.focus();
+        function addRow(value = '', color = DEFAULT_COLOR, shouldFocus = false) {
+          if (tagList.children.length >= maxTagsPerUser) return null;
+          const row = document.createElement('div');
+          row.className = 'v2t-tag-row';
+
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.maxLength = maxTagLength;
+          input.placeholder = '标签内容';
+          input.value = value;
+          input.setAttribute('aria-label', `${user} 的标签`);
+          input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); commit(); }
+            else if (e.key === 'Escape') { e.preventDefault(); close(); }
           });
-          swatches.appendChild(dot);
+
+          const colorPicker = createColorPicker(color);
+
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'v2t-tag-remove';
+          remove.textContent = '×';
+          remove.title = '移除这一项';
+          remove.setAttribute('aria-label', '移除这一项');
+          remove.addEventListener('click', () => {
+            row.remove();
+            syncAddButton();
+          });
+
+          row.append(input, colorPicker, remove);
+          tagList.appendChild(row);
+          syncAddButton();
+          if (shouldFocus) input.focus();
+          return row;
         }
 
-        toggle.addEventListener('click', () => {
-          swatches.classList.toggle('open');
-          syncColor();
-          place();
-        });
-        if (existing && existing.color !== DEFAULT_COLOR) swatches.classList.add('open');
-        syncColor();
+        for (const item of existing?.tags || [{ tag: '', color: DEFAULT_COLOR }]) {
+          addRow(item.tag, item.color);
+        }
+        addRowBtn.addEventListener('click', () => addRow('', DEFAULT_COLOR, true));
+        el.append(head, tagList, addRowBtn);
 
-        el.append(head, input, toggle, swatches);
-
-        const recent = suggestions().filter(item => item.tag !== input.value);
+        const recent = suggestions();
         if (recent.length) {
           const list = document.createElement('div');
           list.className = 'v2t-recent';
@@ -3019,7 +3550,13 @@
             chip.className = 'v2t-recent-item';
             chip.textContent = item.tag;
             chip.title = `已用于 ${item.count} 人`;
-            chip.addEventListener('click', () => { input.value = item.tag; input.focus(); });
+            chip.style.setProperty('--v2t-recent-color', colorItem(item.color).swatch);
+            chip.addEventListener('click', () => {
+              const duplicate = [...tagList.querySelectorAll('input')]
+                .find(input => input.value.trim().toLocaleLowerCase() === item.tag.toLocaleLowerCase());
+              if (duplicate) { duplicate.focus(); return; }
+              addRow(item.tag, item.color, true);
+            });
             list.appendChild(chip);
           }
           el.appendChild(list);
@@ -3031,10 +3568,10 @@
           const del = document.createElement('button');
           del.type = 'button';
           del.className = 'v2t-btn danger';
-          del.textContent = '删除';
+          del.textContent = '删除全部';
           del.addEventListener('click', () => {
-            removeTag(user);
-            toast(`已删除 ${user} 的标签`);
+            removeTags(user);
+            toast(`已删除 ${user} 的全部标签`);
             close();
           });
           actions.appendChild(del);
@@ -3051,22 +3588,32 @@
         save.className = 'v2t-btn primary';
         save.textContent = '保存';
 
-        const commit = () => {
-          const value = input.value.trim();
-          if (!value) {
-            if (existing) { removeTag(user); toast(`已删除 ${user} 的标签`); }
+        commit = () => {
+          const values = [];
+          const seen = new Set();
+          for (const row of tagList.children) {
+            const input = row.querySelector('input');
+            const value = input.value.replace(/\s+/g, ' ').trim();
+            if (!value) continue;
+            const key = value.toLocaleLowerCase();
+            if (seen.has(key)) {
+              toast(`标签“${value}”重复了`);
+              input.focus();
+              return;
+            }
+            seen.add(key);
+            values.push({ tag: value, color: row.querySelector('.v2t-color-picker').dataset.color });
+          }
+          if (!values.length) {
+            if (existing) { removeTags(user); toast(`已删除 ${user} 的全部标签`); }
             close();
             return;
           }
-          setTag(user, value, currentColor);
-          toast(`已${existing ? '更新' : '添加'} ${user} 的标签`);
+          setTags(user, values);
+          toast(`已保存 ${user} 的 ${values.length} 个标签`);
           close();
         };
         save.addEventListener('click', commit);
-        input.addEventListener('keydown', e => {
-          if (e.key === 'Enter') { e.preventDefault(); commit(); }
-          else if (e.key === 'Escape') { e.preventDefault(); close(); }
-        });
 
         actions.append(spacer, cancel, save);
         el.appendChild(actions);
@@ -3076,8 +3623,9 @@
         requestAnimationFrame(() => {
           el.classList.add('visible');
           place();
-          input.focus();
-          input.select();
+          const firstInput = tagList.querySelector('input');
+          firstInput?.focus();
+          if (existing) firstInput?.select();
         });
         window.addEventListener('scroll', place, true);
         window.addEventListener('resize', place);
@@ -3093,20 +3641,106 @@
       let countEl = null;
       let mergeEl = null;
       let searchEl = null;
+      let closeBtn = null;
+      let embeddedCleanup = null;
       let pending = null; // 待确认的导入数据
       let strategy = 'smart';
 
       function isOpen() { return !!overlay?.classList.contains('active'); }
+
+      function editInline(item, row) {
+        Editor.close();
+        row.replaceChildren();
+
+        const editor = document.createElement('div');
+        editor.className = 'v2t-inline-editor';
+        const head = document.createElement('div');
+        head.className = 'v2t-inline-editor-head';
+        const user = document.createElement('b');
+        user.textContent = item.name || item.key;
+        head.append(user, document.createTextNode('的标签'));
+
+        const tagList = document.createElement('div');
+        tagList.className = 'v2t-inline-tag-list';
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'v2t-inline-add';
+        addBtn.textContent = '＋ 添加一个标签';
+
+        const syncAdd = () => {
+          addBtn.disabled = tagList.children.length >= maxTagsPerUser;
+          addBtn.textContent = addBtn.disabled ? `最多 ${maxTagsPerUser} 个标签` : '＋ 添加一个标签';
+        };
+
+        function addRow(value = '', color = DEFAULT_COLOR, focus = false) {
+          if (tagList.children.length >= maxTagsPerUser) return;
+          const tagRow = document.createElement('div');
+          tagRow.className = 'v2t-inline-tag-row';
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.maxLength = maxTagLength;
+          input.placeholder = '标签内容';
+          input.value = value;
+          const colorPicker = createColorPicker(color);
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'v2t-inline-remove';
+          remove.textContent = '×';
+          remove.title = '移除这一项';
+          remove.addEventListener('click', () => { tagRow.remove(); syncAdd(); });
+          tagRow.append(input, colorPicker, remove);
+          tagList.appendChild(tagRow);
+          syncAdd();
+          if (focus) input.focus();
+        }
+
+        for (const tag of item.tags) addRow(tag.tag, tag.color);
+        addBtn.addEventListener('click', () => addRow('', DEFAULT_COLOR, true));
+
+        const actions = document.createElement('div');
+        actions.className = 'v2t-inline-actions';
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'v2t-btn';
+        cancel.textContent = '取消';
+        cancel.addEventListener('click', renderList);
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'v2t-btn primary';
+        save.textContent = '保存';
+        save.addEventListener('click', () => {
+          const tags = [];
+          const seen = new Set();
+          for (const tagRow of tagList.children) {
+            const input = tagRow.querySelector('input');
+            const tag = input.value.replace(/\s+/g, ' ').trim();
+            if (!tag) continue;
+            const key = tag.toLocaleLowerCase();
+            if (seen.has(key)) { toast(`标签“${tag}”重复了`); input.focus(); return; }
+            seen.add(key);
+            tags.push({ tag, color: tagRow.querySelector('.v2t-color-picker').dataset.color });
+          }
+          setTags(item.name || item.key, tags);
+          toast(tags.length ? `已保存 ${tags.length} 个标签` : `已删除 ${item.name || item.key} 的全部标签`);
+        });
+        actions.append(cancel, save);
+        editor.append(head, tagList, addBtn, actions);
+        row.appendChild(editor);
+        tagList.querySelector('input')?.focus();
+      }
 
       function renderList() {
         if (!listEl) return;
         const keyword = (searchEl?.value || '').trim().toLowerCase();
         const all = entries();
         const rows = keyword
-          ? all.filter(item => item.key.includes(keyword) || item.tag.toLowerCase().includes(keyword))
+          ? all.filter(item => item.key.includes(keyword)
+            || item.name.toLowerCase().includes(keyword)
+            || item.tags.some(tag => tag.tag.toLowerCase().includes(keyword)))
           : all;
 
-        countEl.textContent = keyword ? `${rows.length} / ${all.length}` : `${all.length} 个用户`;
+        const tagTotal = all.reduce((sum, item) => sum + item.tags.length, 0);
+        countEl.textContent = keyword ? `${rows.length} / ${all.length} 个用户` : `${all.length} 个用户 · ${tagTotal} 个标签`;
         listEl.replaceChildren();
 
         if (!rows.length) {
@@ -3133,6 +3767,12 @@
           slot.className = 'v2t-slot';
           slot.dataset.user = item.name || item.key;
           paintSlot(slot);
+          slot.addEventListener('click', event => {
+            if (!event.target.closest('.v2t-chip')) return;
+            event.preventDefault();
+            event.stopPropagation();
+            editInline(item, row);
+          });
 
           const time = document.createElement('span');
           time.className = 'v2t-time';
@@ -3142,13 +3782,13 @@
           edit.className = 'v2t-row-act';
           edit.textContent = '编辑';
           edit.setAttribute('role', 'button');
-          edit.addEventListener('click', () => Editor.open(item.name || item.key, edit));
+          edit.addEventListener('click', () => editInline(item, row));
 
           const del = document.createElement('span');
           del.className = 'v2t-row-act danger';
           del.textContent = '删除';
           del.setAttribute('role', 'button');
-          del.addEventListener('click', () => { removeTag(item.key); });
+          del.addEventListener('click', () => { removeTags(item.key); });
 
           row.append(user, slot, time, edit, del);
           fragment.appendChild(row);
@@ -3168,7 +3808,8 @@
         mergeEl.replaceChildren();
 
         const title = document.createElement('div');
-        title.innerHTML = `准备导入 <b>${Object.keys(pending.tags).length}</b> 条标签`
+        const incomingTagCount = Object.values(pending.tags).reduce((sum, entry) => sum + entry.tags.length, 0);
+        title.innerHTML = `准备导入 <b>${Object.keys(pending.tags).length}</b> 个用户、<b>${incomingTagCount}</b> 个标签`
           + (pending.invalid ? `（已忽略 <b>${pending.invalid}</b> 条无效记录）` : '');
 
         const opts = document.createElement('div');
@@ -3278,7 +3919,7 @@
           const payload = exportPayload();
           if (!payload.count) { toast('还没有标签可导出'); return; }
           download(`v2ex-user-tags-${ymd()}.json`, JSON.stringify(payload, null, 2));
-          toast(`已导出 ${payload.count} 条标签`);
+          toast(`已导出 ${payload.count} 个用户、${payload.tagCount} 个标签`);
         });
         const importBtn = document.createElement('button');
         importBtn.type = 'button';
@@ -3293,7 +3934,8 @@
           const current = load();
           const total = Object.keys(current.tags).length;
           if (!total) { toast('没有可清空的标签'); return; }
-          if (!window.confirm(`确定删除全部 ${total} 条标签？此操作不可撤销。`)) return;
+          const tagTotal = Object.values(current.tags).reduce((sum, entry) => sum + entry.tags.length, 0);
+          if (!window.confirm(`确定删除 ${total} 个用户的全部 ${tagTotal} 个标签？此操作不可撤销。`)) return;
           const next = { v: exportVersion, tags: {}, deleted: { ...current.deleted } };
           const now = Date.now();
           for (const key of Object.keys(current.tags)) next.deleted[key] = now;
@@ -3302,7 +3944,7 @@
         });
         const spacer = document.createElement('span');
         spacer.className = 'v2t-spacer';
-        const closeBtn = document.createElement('button');
+        closeBtn = document.createElement('button');
         closeBtn.type = 'button';
         closeBtn.className = 'v2t-btn';
         closeBtn.textContent = '关闭';
@@ -3312,15 +3954,31 @@
         panel.append(head, listEl, mergeEl, foot);
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
-        overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+        overlay.addEventListener('click', e => {
+          if (!overlay.classList.contains('embedded') && e.target === overlay) close();
+        });
       }
 
       function onKey(e) {
         if (e.key === 'Escape' && isOpen() && !Editor.isOpen()) close();
       }
 
-      function open() {
+      function open(options = {}) {
         if (!overlay) build();
+        if (embeddedCleanup) {
+          embeddedCleanup();
+          embeddedCleanup = null;
+        }
+        if (options.host) {
+          overlay.classList.add('embedded');
+          options.host.insertBefore(overlay, options.before || null);
+          embeddedCleanup = options.onClose || null;
+          closeBtn.textContent = '返回设置';
+        } else {
+          overlay.classList.remove('embedded');
+          document.body.appendChild(overlay);
+          closeBtn.textContent = '关闭';
+        }
         pending = null;
         searchEl.value = '';
         renderMerge();
@@ -3333,8 +3991,15 @@
       function close() {
         if (!overlay) return;
         Editor.close();
-        overlay.classList.remove('active');
+        const wasEmbedded = overlay.classList.contains('embedded');
+        overlay.classList.remove('active', 'embedded');
+        if (wasEmbedded) document.body.appendChild(overlay);
         document.removeEventListener('keydown', onKey);
+        if (embeddedCleanup) {
+          const cleanup = embeddedCleanup;
+          embeddedCleanup = null;
+          cleanup();
+        }
       }
 
       function refresh() {
@@ -3345,8 +4010,49 @@
     })();
 
     // ── 装载 ──
+    function mountSettingsEntry() {
+      if (!/^\/settings(?:\/|$)/.test(location.pathname)) return;
+      const nav = [...document.querySelectorAll('#Main .box > .cell')]
+        .find(cell => cell.querySelector(':scope > a[href="/settings/privacy"]'));
+      if (!nav || nav.querySelector('#v2t-settings-entry')) return;
+      const box = nav.parentElement;
+      const nativeCurrent = nav.querySelector(':scope > .tab_current');
+      const navIndex = [...box.children].indexOf(nav);
+      const nativeSections = [...box.children].slice(navIndex + 1);
+      if (!nativeSections.length) return;
+
+      const entry = document.createElement('a');
+      entry.id = 'v2t-settings-entry';
+      entry.className = 'tab';
+      entry.href = '#v2t-user-tags';
+      entry.textContent = '用户标签';
+      entry.title = '管理、导入或导出用户标签';
+      entry.addEventListener('click', event => {
+        event.preventDefault();
+        if (entry.classList.contains('tab_current')) return;
+        const previousHidden = nativeSections.map(section => section.hidden);
+        nativeSections.forEach(section => { section.hidden = true; });
+        if (nativeCurrent) nativeCurrent.className = 'tab';
+        entry.className = 'tab_current';
+        Manager.open({
+          host: box,
+          before: nativeSections[0],
+          onClose: () => {
+            nativeSections.forEach((section, index) => { section.hidden = previousHidden[index]; });
+            entry.className = 'tab';
+            if (nativeCurrent) nativeCurrent.className = 'tab_current';
+          },
+        });
+      });
+      nav.appendChild(entry);
+    }
+
     function boot() {
       decorate(document);
+      mountSettingsEntry();
+      document.addEventListener('click', event => {
+        if (!event.target.closest?.('.v2t-color-picker, .v2t-color-orbit')) closeColorPickers();
+      });
 
       // 统一委托：胶囊 / + 按钮 / 点击空白关闭气泡
       document.addEventListener('click', e => {
@@ -3366,7 +4072,7 @@
         trigger.click();
       });
       document.addEventListener('mousedown', e => {
-        if (Editor.isOpen() && !e.target.closest?.('.v2t-chip, .v2t-add, #v2t-editor')) Editor.close();
+        if (Editor.isOpen() && !e.target.closest?.('.v2t-chip, .v2t-add, #v2t-editor, .v2t-color-orbit')) Editor.close();
       });
 
       // 只扫新插入的子树，不做全文档 rescan：楼层树一次会搬进上千个节点，
@@ -3403,12 +4109,15 @@
         Manager.refresh();
       });
 
-      // 管理面板（导入 / 导出 / 批量编辑）是低频操作，入口放在油猴菜单里，
-      // 不在每个主题页的标题旁常驻一个按钮。日常打标签走用户名旁的 + 即可。
-      GM.menu('用户标签管理…', () => Manager.open());
     }
 
-    return { boot, decorate, open: () => Manager.open() };
+    return {
+      boot,
+      decorate,
+      bulkAdd,
+      createColorPicker,
+      toast,
+    };
   })();
 
   // =========================
