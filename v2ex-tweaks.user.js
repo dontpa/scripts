@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.7
+// @version      2.5.8
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -45,8 +45,6 @@
       // 网络类错误的自动补签：失败后延迟重试，避免一次抖动就漏签
       networkRetries: 3,
       networkRetryDelayMs: 5 * 60 * 1000,
-      // 页面长期打开时的兜底轮询：仅在"今日未签到"时才真正发请求
-      pollIntervalMs: 15 * 60 * 1000,
       // V2EX 的每日奖励按服务器所在时区（UTC+8）跨天，不能用 UTC 日期判断
       timeZone: 'Asia/Shanghai',
       storeKey: 'v2ex_daily_check_ymd_v4',
@@ -1414,9 +1412,18 @@
       if (document.readyState === 'complete') start();
       else window.addEventListener('load', start, { once: true });
 
-      // 长期打开的页面靠轮询跨天补签；后台标签页恢复可见时立刻补一次。
-      // 轮询本身零成本：当天已签到时 tick 不会发出任何请求。
-      setInterval(tick, CONFIG.daily.pollIntervalMs);
+      // 长期打开的页面也要覆盖"持续可见地跨过北京时间零点"这一场景（kiosk /
+      // 常亮标签页），但不再用 15 分钟轮询：自链式定时器直接对准下一个 UTC
+      // 16:00（= 北京时间次日零点；UTC 无夏令时，无需任何时区换算）并加抖动，
+      // 每天只唤醒一两次。后台标签页跨天仍由 visibilitychange 立刻补签。
+      const scheduleMidnightTick = () => {
+        const now = Date.now();
+        const next = new Date(now);
+        next.setUTCHours(16, randInt(0, 300), 0, 0);
+        if (next.getTime() <= now) next.setUTCDate(next.getUTCDate() + 1);
+        setTimeout(() => { tick(); scheduleMidnightTick(); }, next.getTime() - now);
+      };
+      scheduleMidnightTick();
       document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
     }
     return { boot, run };
@@ -1584,10 +1591,31 @@
           btn.classList.remove('copied');
         }, 1200);
       });
+      // 楼层树一次会搬进上千个节点，逐节点立即扫描会在同一批变更里重复
+      // 走满 querySelectorAll。用 Set 攒住新增根节点，防抖后统一处理；
+      // 同批里祖先覆盖后代、以及自己插入的解码结果，由既有幂等护栏去重。
+      const pendingRoots = new Set();
+      const flushScan = debounce(() => {
+        const roots = [...pendingRoots];
+        pendingRoots.clear();
+        for (const node of roots) {
+          if (node.isConnected) processAddedNode(node);
+        }
+      }, 150);
       new MutationObserver(mutations => {
         for (const mut of mutations) {
-          for (const node of mut.addedNodes) processAddedNode(node);
+          for (const node of mut.addedNodes) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              if (node.closest('.v2-b64-wrap')) continue;
+            } else if (node.nodeType === Node.TEXT_NODE) {
+              if (node.parentElement?.closest('.v2-b64-wrap')) continue;
+            } else {
+              continue;
+            }
+            pendingRoots.add(node);
+          }
         }
+        if (pendingRoots.size) flushScan();
       }).observe(root, { childList: true, subtree: true });
     }
     return { boot };
@@ -2327,7 +2355,9 @@
       let hoverTimer = null;
       const scheduleHoverPreview = () => {
         clearTimeout(hoverTimer);
-        hoverTimer = setTimeout(() => initHoverPreview(allReplies, maps), 50);
+        // 250ms > B64 观察器的 150ms 防抖窗口：等它把本批 DOM 改完再挂预览，
+        // 否则悬停预览可能落在尚未解码的原始文本上。
+        hoverTimer = setTimeout(() => initHoverPreview(allReplies, maps), 250);
       };
 
       // ── 失败页重试（支持递归多次重试）──
@@ -2382,7 +2412,7 @@
         attachRetry([...failedPages]);
       }
 
-      // 等待 B64 的 MutationObserver 完成本轮 DOM 处理。
+      // 等待 B64 的防抖扫描完成本轮 DOM 处理（见 scheduleHoverPreview 的延时说明）。
       scheduleHoverPreview();
     }
 
@@ -2801,12 +2831,15 @@
     function scanAll() { document.querySelectorAll('img[src*="imgur.com"]').forEach(processImage); }
     function boot() {
       scanAll();
+      // Imgur 图只出现在话题/回复正文里：初始 scanAll 保持全页兜底，
+      // 增量观察则收窄到 #Main，避免头部/头像 src 抖动触发无谓回调。
+      const root = document.querySelector('#Main') || document.body;
       new MutationObserver(mutations => {
         for (const mutation of mutations) {
           if (mutation.type === 'attributes') processImage(mutation.target);
           else for (const node of mutation.addedNodes) processNode(node);
         }
-      }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+      }).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
     }
     return { boot };
   })();
