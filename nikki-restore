@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""Cache OpenWrt-nikki APKs on this machine and reinstall them after ASU.
+
+Nikki is a third-party feed, so attended sysupgrade / owut cannot keep it in
+the image. UCI config and /etc/nikki data stay on the overlay; the packages
+do not. Fetch the APKs before you upgrade, then install from this cache
+afterwards so the router does not have to re-download mihomo (~40MB).
+
+  # while the current firmware is still running (or anytime you have network)
+  ./nikki-restore fetch
+
+  # after sysupgrade, once ssh wrt-test works again
+  ./nikki-restore install
+
+  # this router, right now: fetch if needed and install
+  ./nikki-restore restore
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Sequence
+
+FEED_BASE = "https://nikkinikki.pages.dev"
+DEFAULT_HOST = "wrt-test"
+USER_AGENT = "Mozilla/5.0 nikki-restore"
+CORE_PACKAGES = ("mihomo-meta", "mihomo-alpha")
+I18N_BY_LANG = {
+    "zh_cn": "luci-i18n-nikki-zh-cn",
+    "zh-cn": "luci-i18n-nikki-zh-cn",
+    "zh_tw": "luci-i18n-nikki-zh-tw",
+    "zh-tw": "luci-i18n-nikki-zh-tw",
+    "ru": "luci-i18n-nikki-ru",
+}
+
+
+class CmdError(RuntimeError):
+    pass
+
+
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def default_cache() -> Path:
+    return script_dir() / "packages"
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def run(
+    argv: Sequence[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        list(argv),
+        check=False,
+        text=True,
+        capture_output=capture,
+        env=env,
+    )
+    if check and proc.returncode != 0:
+        detail = ""
+        if capture:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            if detail:
+                detail = "\n" + detail
+        raise CmdError(f"command failed ({proc.returncode}): {shlex.join(argv)}{detail}")
+    return proc
+
+
+def ssh(host: str, remote: str, *, check: bool = True, capture: bool = True) -> str:
+    proc = run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, remote],
+        check=check,
+        capture=capture,
+    )
+    return (proc.stdout or "").rstrip("\n")
+
+
+def ssh_upload(host: str, files: Sequence[Path], dest_dir: str) -> None:
+    """Copy files through tar|ssh. Dropbear has no sftp-server, so scp fails."""
+    if not files:
+        raise CmdError("no files to upload")
+    parents = {path.parent.resolve() for path in files}
+    if len(parents) != 1:
+        raise CmdError("upload files must share one directory")
+    parent = parents.pop()
+    ssh(host, f"mkdir -p {shlex.quote(dest_dir)}")
+    tar_env = os.environ.copy()
+    tar_env["COPYFILE_DISABLE"] = "1"
+    tar = subprocess.Popen(
+        ["tar", "-C", str(parent), "-cf", "-", *[path.name for path in files]],
+        stdout=subprocess.PIPE,
+        env=tar_env,
+    )
+    try:
+        proc = subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                host,
+                f"tar -C {shlex.quote(dest_dir)} -xf -",
+            ],
+            stdin=tar.stdout,
+            capture_output=True,
+        )
+    finally:
+        if tar.stdout:
+            tar.stdout.close()
+        tar.wait()
+    if tar.returncode:
+        raise CmdError(f"tar failed while uploading to {host}:{dest_dir}")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or b"").decode("utf-8", "replace").strip()
+        raise CmdError(
+            f"upload to {host}:{dest_dir} failed ({proc.returncode})"
+            + (f"\n{detail}" if detail else "")
+        )
+
+
+def curl_download(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    run(
+        [
+            "curl",
+            "-L",
+            "--fail",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "2",
+            "-A",
+            USER_AGENT,
+            "--connect-timeout",
+            "20",
+            "-o",
+            str(tmp),
+            url,
+        ],
+        capture=False,
+    )
+    tmp.replace(dest)
+
+
+def curl_json(url: str) -> dict:
+    proc = run(
+        [
+            "curl",
+            "-L",
+            "--fail",
+            "--retry",
+            "3",
+            "-A",
+            USER_AGENT,
+            "--connect-timeout",
+            "20",
+            "-sS",
+            url,
+        ],
+        capture=True,
+    )
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise CmdError(f"invalid JSON from {url}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CmdError(f"unexpected JSON from {url}")
+    return data
+
+
+def branch_from_release(version: str) -> str:
+    if version == "SNAPSHOT" or version.lower() == "snapshot":
+        return "SNAPSHOT"
+    if "24.10" in version:
+        return "openwrt-24.10"
+    if "25.12" in version:
+        return "openwrt-25.12"
+    raise CmdError(f"unsupported OpenWrt release: {version}")
+
+
+def probe_router(host: str) -> dict[str, str]:
+    remote = r"""
+set -e
+. /etc/os-release
+echo "version=$VERSION_ID"
+echo "pretty=$PRETTY_NAME"
+echo "arch=$OPENWRT_ARCH"
+echo "board=${OPENWRT_BOARD:-}"
+if [ -x /usr/bin/apk ]; then echo pkg=apk
+elif [ -x /bin/opkg ]; then echo pkg=opkg
+else echo pkg=unknown
+fi
+echo "lang=$(uci -q get luci.main.lang || true)"
+echo "nikki_enabled=$(uci -q get nikki.config.enabled || true)"
+echo "nikki_profile=$(uci -q get nikki.config.profile || true)"
+echo "has_config=$([ -f /etc/config/nikki ] && echo yes || echo no)"
+echo "has_data=$([ -d /etc/nikki ] && echo yes || echo no)"
+echo "has_key=$([ -f /etc/apk/keys/nikki.pem ] && echo yes || echo no)"
+echo "has_feed=$(grep -q nikki /etc/apk/repositories.d/customfeeds.list 2>/dev/null && echo yes || echo no)"
+echo "has_init=$([ -x /etc/init.d/nikki ] && echo yes || echo no)"
+if [ -x /usr/bin/apk ]; then
+  echo "installed=$(apk list --installed 2>/dev/null | awk '/^(nikki-|luci-app-nikki-|luci-i18n-nikki-|mihomo-)/{printf "%s ", $1}')"
+fi
+echo "overlay_avail_kb=$(df -Pk /overlay 2>/dev/null | awk 'NR==2{print $4}')"
+echo "tmp_avail_kb=$(df -Pk /tmp 2>/dev/null | awk 'NR==2{print $4}')"
+"""
+    raw = ssh(host, remote)
+    info: dict[str, str] = {}
+    for line in raw.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        info[key] = value.strip()
+    required = ("version", "arch", "pkg")
+    missing = [key for key in required if not info.get(key)]
+    if missing:
+        raise CmdError(f"failed to probe {host}; missing {missing}\n{raw}")
+    info["branch"] = branch_from_release(info["version"])
+    info["host"] = host
+    return info
+
+
+def feed_url(branch: str, arch: str) -> str:
+    return f"{FEED_BASE}/{branch}/{arch}/nikki"
+
+
+def apk_filename(name: str, version: str) -> str:
+    return f"{name}-{version}.apk"
+
+
+def wanted_packages(core: str, i18n: str | None) -> list[str]:
+    names = [core, "nikki", "luci-app-nikki"]
+    if i18n:
+        names.append(i18n)
+    return names
+
+
+def detect_i18n(lang: str) -> str | None:
+    lang = (lang or "").strip().lower()
+    if not lang or lang in {"auto", "en", "en_us"}:
+        return None
+    return I18N_BY_LANG.get(lang)
+
+
+def load_index(branch: str, arch: str) -> dict:
+    url = f"{feed_url(branch, arch)}/index.json"
+    index = curl_json(url)
+    packages = index.get("packages")
+    if not isinstance(packages, dict):
+        raise CmdError(f"feed index has no packages object: {url}")
+    return index
+
+
+def cache_paths(cache: Path, branch: str, arch: str) -> Path:
+    return cache / branch / arch
+
+
+def write_manifest(dir_path: Path, payload: dict) -> None:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "manifest.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def read_manifest(dir_path: Path) -> dict | None:
+    path = dir_path / "manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def fetch_packages(
+    *,
+    cache: Path,
+    branch: str,
+    arch: str,
+    core: str,
+    i18n: str | None,
+) -> list[Path]:
+    index = load_index(branch, arch)
+    packages: dict[str, str] = index["packages"]
+    dest_dir = cache_paths(cache, branch, arch)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    key_path = dest_dir / "nikki.pem"
+    log(f"downloading signing key -> {key_path}")
+    curl_download(f"{FEED_BASE}/public-key.pem", key_path)
+
+    files: list[Path] = []
+    for name in wanted_packages(core, i18n):
+        version = packages.get(name)
+        if not version:
+            known = ", ".join(sorted(packages))
+            raise CmdError(f"feed has no package {name!r}. available: {known}")
+        filename = apk_filename(name, version)
+        dest = dest_dir / filename
+        url = f"{feed_url(branch, arch)}/{filename}"
+        log(f"downloading {filename}")
+        curl_download(url, dest)
+        files.append(dest)
+
+    write_manifest(
+        dest_dir,
+        {
+            "arch": arch,
+            "branch": branch,
+            "core": core,
+            "feed": feed_url(branch, arch),
+            "files": [path.name for path in files],
+            "i18n": i18n,
+            "packages": {name: packages[name] for name in wanted_packages(core, i18n)},
+        },
+    )
+    log(f"cached {len(files)} packages in {dest_dir}")
+    return files
+
+
+def cached_apks(cache: Path, branch: str, arch: str) -> list[Path]:
+    dest_dir = cache_paths(cache, branch, arch)
+    manifest = read_manifest(dest_dir)
+    if manifest and manifest.get("files"):
+        files = [dest_dir / name for name in manifest["files"]]
+        missing = [path for path in files if not path.is_file()]
+        if missing:
+            names = ", ".join(path.name for path in missing)
+            raise CmdError(f"cache incomplete, missing: {names}. run fetch again.")
+        return files
+    files = sorted(dest_dir.glob("*.apk"))
+    if not files:
+        raise CmdError(f"no APKs in {dest_dir}. run fetch first.")
+    return files
+
+
+def print_status(info: dict[str, str], cache: Path) -> None:
+    dest_dir = cache_paths(cache, info["branch"], info["arch"])
+    cached = list(dest_dir.glob("*.apk")) if dest_dir.is_dir() else []
+    log(f"host        {info['host']}")
+    log(f"firmware    {info.get('pretty') or info['version']}")
+    log(f"arch        {info['arch']}")
+    log(f"branch      {info['branch']}")
+    log(f"pkg mgr     {info['pkg']}")
+    log(f"luci lang   {info.get('lang') or '-'}")
+    log(f"config      {info.get('has_config')}")
+    log(f"data dir    {info.get('has_data')}")
+    log(f"feed/key    feed={info.get('has_feed')} key={info.get('has_key')}")
+    log(f"init        {info.get('has_init')}")
+    log(f"uci enabled {info.get('nikki_enabled') or '-'}")
+    log(f"profile     {info.get('nikki_profile') or '-'}")
+    log(f"installed   {info.get('installed') or '(none)'}")
+    log(f"overlay free {info.get('overlay_avail_kb') or '?'} KiB")
+    log(f"cache       {dest_dir}")
+    if cached:
+        for path in cached:
+            log(f"  {path.name}  {path.stat().st_size} bytes")
+    else:
+        log("  (empty)")
+
+
+def ensure_feed(host: str, info: dict[str, str], key_path: Path | None) -> None:
+    if info["pkg"] != "apk":
+        raise CmdError("this helper currently supports OpenWrt apk (25.12+).")
+    feed = feed_url(info["branch"], info["arch"]) + "/packages.adb"
+    if key_path and key_path.is_file():
+        ssh_upload(host, [key_path], "/etc/apk/keys")
+    else:
+        ssh(
+            host,
+            "wget -q -O /etc/apk/keys/nikki.pem "
+            f"{shlex.quote(FEED_BASE + '/public-key.pem')}",
+        )
+    remote = f"""
+set -e
+mkdir -p /etc/apk/repositories.d
+list=/etc/apk/repositories.d/customfeeds.list
+touch "$list"
+if grep -q nikki "$list"; then
+  sed -i '/nikki/d' "$list"
+fi
+printf '%s\\n' {shlex.quote(feed)} >> "$list"
+"""
+    ssh(host, remote)
+    log("nikki apk feed and key are in place")
+
+
+def remote_install(host: str, remote_dir: str, files: Sequence[Path]) -> str:
+    # Local files are not in a repository index; apk still records them in world.
+    apk_args = " ".join(
+        shlex.quote(f"{remote_dir}/{path.name}") for path in files
+    )
+    return ssh(
+        host,
+        f"""
+set -e
+if [ ! -x /usr/bin/apk ]; then
+  echo "apk not found" >&2
+  exit 1
+fi
+apk add --allow-untrusted --force-non-repository {apk_args}
+if [ -x /etc/init.d/nikki ]; then
+  /etc/init.d/nikki enable
+  /etc/init.d/nikki restart
+fi
+apk list --installed | awk '/^(nikki-|luci-app-nikki-|luci-i18n-nikki-|mihomo-)/{{print}}'
+""",
+    )
+
+
+def wait_for_service(host: str, seconds: int = 25) -> str:
+    # nikki.config.start_delay may be 20s
+    time.sleep(min(3, seconds))
+    return ssh(
+        host,
+        """
+if [ -x /etc/init.d/nikki ]; then
+  /etc/init.d/nikki status || true
+fi
+pidof nikki 2>/dev/null || pidof mihomo 2>/dev/null || true
+""",
+        check=False,
+    )
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    info = probe_router(args.host)
+    print_status(info, args.cache)
+    return 0
+
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    if args.arch and args.branch:
+        branch, arch, lang = args.branch, args.arch, args.lang or ""
+        log(f"using explicit {branch}/{arch}")
+    else:
+        info = probe_router(args.host)
+        branch, arch, lang = info["branch"], info["arch"], info.get("lang") or ""
+        log(f"router {args.host}: {info.get('pretty')} {arch}")
+    i18n = args.i18n if args.i18n is not None else detect_i18n(args.lang or lang)
+    fetch_packages(
+        cache=args.cache, branch=branch, arch=arch, core=args.core, i18n=i18n
+    )
+    return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    info = probe_router(args.host)
+    if info["pkg"] != "apk":
+        raise CmdError(f"unsupported package manager: {info['pkg']}")
+    print_status(info, args.cache)
+
+    if info.get("has_init") == "yes" and not args.force:
+        installed = info.get("installed") or ""
+        if "nikki-" in installed:
+            log("nikki is already installed. pass --force to reinstall from cache.")
+            return 0
+
+    files = cached_apks(args.cache, info["branch"], info["arch"])
+    dest_dir = cache_paths(args.cache, info["branch"], info["arch"])
+    overlay_kb = int(info.get("overlay_avail_kb") or "0")
+    # mihomo unpacks to ~41MiB; keep a small safety margin
+    if overlay_kb and overlay_kb < 48 * 1024:
+        raise CmdError(
+            f"/overlay only has {overlay_kb} KiB free; need ~48 MiB for mihomo"
+        )
+
+    ensure_feed(args.host, info, dest_dir / "nikki.pem")
+    remote_dir = "/tmp/nikki-restore"
+    host = args.host
+    ssh(host, f"rm -rf {remote_dir} && mkdir -p {remote_dir}")
+    log(f"uploading {len(files)} APKs to {host}:{remote_dir}")
+    ssh_upload(host, files, remote_dir)
+    log("installing on router from uploaded APKs")
+    installed = remote_install(host, remote_dir, files)
+    ssh(host, f"rm -rf {remote_dir}", check=False)
+    log("installed:")
+    log(installed or "(apk produced no package list)")
+    status = wait_for_service(host)
+    if status.strip():
+        log("service:")
+        log(status)
+    log("done. LuCI: Network → Nikki. existing /etc/config/nikki was kept.")
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    info = probe_router(args.host)
+    dest_dir = cache_paths(args.cache, info["branch"], info["arch"])
+    try:
+        cached_apks(args.cache, info["branch"], info["arch"])
+        log(f"using existing cache in {dest_dir}")
+    except CmdError:
+        i18n = args.i18n if args.i18n is not None else detect_i18n(
+            args.lang or info.get("lang") or ""
+        )
+        fetch_packages(
+            cache=args.cache,
+            branch=info["branch"],
+            arch=info["arch"],
+            core=args.core,
+            i18n=i18n,
+        )
+    return cmd_install(args)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("NIKKI_HOST", DEFAULT_HOST),
+        help=f"SSH host (default: {DEFAULT_HOST} or $NIKKI_HOST)",
+    )
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        default=default_cache(),
+        help=f"local APK cache (default: {default_cache()})",
+    )
+    parser.add_argument(
+        "--core",
+        choices=CORE_PACKAGES,
+        default="mihomo-meta",
+        help="mihomo provider to pin (default: mihomo-meta, stable)",
+    )
+    parser.add_argument(
+        "--i18n",
+        default=None,
+        help="luci i18n package, e.g. luci-i18n-nikki-zh-cn (auto from luci.main.lang)",
+    )
+    parser.add_argument("--lang", default=None, help="override luci language, e.g. zh_cn")
+    parser.add_argument("--arch", default=None, help="skip SSH probe (with --branch)")
+    parser.add_argument(
+        "--branch",
+        default=None,
+        help="feed branch, e.g. openwrt-25.12 (with --arch)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reinstall even if nikki is already present",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="show router + local cache state").set_defaults(
+        func=cmd_status
+    )
+    sub.add_parser("fetch", help="download APKs for this router into the cache").set_defaults(
+        func=cmd_fetch
+    )
+    sub.add_parser(
+        "install", help="upload cached APKs and apk add them without re-downloading"
+    ).set_defaults(func=cmd_install)
+    sub.add_parser("restore", help="fetch if needed, then install").set_defaults(
+        func=cmd_restore
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.cache = args.cache.expanduser().resolve()
+    try:
+        return args.func(args)
+    except CmdError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

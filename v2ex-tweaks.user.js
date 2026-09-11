@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.8
+// @version      2.5.11
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -564,7 +564,7 @@
       --rail-gap: 13px;      /* 竖导轨到子回复左边缘的横向距离 = 肘接横线的长度 */
       --rail-width: 1px;     /* 1px 的细线比 2px 干净得多，靠透明度补可见性 */
       --elbow-top: 19px;     /* 肘接横线的高度，对准子回复头像的上半部 */
-      --line-color: rgba(128, 128, 128, 0.38);
+      --line-color: #d3d8de;
       --line-hover: #7fa0f5;
       --bg-hover: #fafbff;
       --new-accent: #4a7af0;
@@ -577,90 +577,92 @@
 
     .box { padding-bottom: 0 !important; }
 
-    /* 竖线（层级导轨）+ 每个直接子回复一小段横线（肘接），
-       让"谁挂在谁下面"一眼可见，而不是只靠缩进去猜。
-
-       导轨不再画成容器的 border-left：那样它会一路拖到整棵子树的最底下，
-       在最后一个子回复的肘接之后还垂着一大截没有任何含义的尾巴。
-       改成每个子回复自带一段竖线、首尾相接拼出整条导轨，
-       最后一个就能在肘接处收住，画成一个圆角 └。 */
-    .reply-children {
-      margin-left: var(--indent-width);
-      padding-left: calc(var(--rail-gap) + var(--rail-width));
-      transition: opacity 0.2s;
-      position: relative;
-    }
-    /* 线的颜色统一走这个变量，悬停时只要换它一处，
-       竖线（background）和圆角 └（border-color）就一起变 */
-    .reply-children > .reply-wrapper { position: relative; --rail-ink: var(--line-color); }
-
-    /* 竖直段：从上一个兄弟接过来，贯穿整个 wrapper（含它自己的子树） */
+    /* 导轨位于子树缩进区，原始回复单元不为控件预留空列。 */
+    .reply-children { margin-left: 32px; padding-left: 0; }
+    .reply-children.reply-children-flat { margin-left: 0; }
+    .reply-wrapper { position: relative; --branch-ink: var(--line-color); }
+    .reply-wrapper > .cell { position: relative; }
+    .reply-children > .reply-wrapper::before,
     .reply-children > .reply-wrapper::after {
-      content: '';
-      position: absolute;
-      left: calc((var(--rail-gap) + var(--rail-width)) * -1);
-      top: 0; bottom: 0;
-      width: var(--rail-width);
-      background: var(--rail-ink);
-      transition: background 0.2s;
-      pointer-events: none;
+      content: ''; position: absolute; pointer-events: none; box-sizing: border-box;
     }
-    /* 肘接：从导轨横向接到子回复左边缘（├ 的那一横） */
+    /* 每组直接子回复共用一根竖线，末项在头像中线处收尾。 */
     .reply-children > .reply-wrapper::before {
-      content: '';
-      position: absolute;
-      left: calc(var(--rail-gap) * -1);
-      top: var(--elbow-top);
-      width: var(--rail-gap);
-      height: var(--rail-width);
-      background: var(--rail-ink);
-      transition: background 0.2s;
-      pointer-events: none;
+      left: -16px; top: 0; bottom: 0;
+      border-left: 1px solid var(--branch-ink);
     }
-    /* 最后一个子回复：竖直段和肘接合成一个带圆角的 └，竖线到此为止 */
-    .reply-children > .reply-wrapper:last-child::before { display: none; }
-    .reply-children > .reply-wrapper:last-child::after {
-      box-sizing: border-box;
-      bottom: auto;
-      width: calc(var(--rail-gap) + var(--rail-width));
-      height: calc(var(--elbow-top) + var(--rail-width));
-      background: none;
-      border-left: var(--rail-width) solid var(--rail-ink);
-      border-bottom: var(--rail-width) solid var(--rail-ink);
-      border-bottom-left-radius: 6px;
-      transition: border-color 0.2s;
+    .reply-children > .reply-wrapper:last-child::before { bottom: auto; height: 30px; }
+    .reply-children > .reply-wrapper::after {
+      left: -16px; top: 22px; width: 20px; height: 8px;
+      border-left: 1px solid var(--branch-ink); border-bottom: 1px solid var(--branch-ink);
+      border-bottom-left-radius: 7px;
     }
-    /* 悬停点亮导轨，但只点亮鼠标当前所在的那一层：:hover 会一路冒泡到所有
-       祖先容器，不加这个 :not(:has(…)) 的话，悬停一条深层回复会把左边每一层
-       的导轨全部点亮，反而看不出层级。 */
-    .reply-children:hover:not(:has(.reply-children:hover)) > .reply-wrapper {
-      --rail-ink: var(--line-hover);
+    /* 封顶后的虚线是继续对话的提示，不伪装成同级的实线分叉。 */
+    .reply-children-flat > .reply-wrapper::before { border-left-style: dashed; }
+    .reply-children-flat > .reply-wrapper::after { border-left-style: dashed; }
+    .reply-wrapper:has(> .reply-branch-toggle:hover) > .reply-children > .reply-wrapper,
+    .reply-wrapper:has(> .reply-branch-toggle:focus-visible) > .reply-children > .reply-wrapper {
+      --branch-ink: var(--line-hover);
     }
+    .reply-parent-link {
+      flex: 0 1 auto; font-size: 11px; color: #77838f !important;
+      text-decoration: none; white-space: nowrap;
+    }
+    .reply-parent-link:hover { color: var(--new-accent) !important; }
+    .reply-branch-toggle {
+      /* 零净高度：按钮坐在父回复底部与子树竖线的交点，不挤动头像。 */
+      position: relative; left: 0; z-index: 1;
+      display: grid; place-items: center; width: 32px; height: 28px;
+      margin: -14px 0; border: 0; border-radius: 50%; padding: 0;
+      color: #77838f; background: var(--box-background-color, #fff); cursor: pointer;
+      transition: color 0.15s, background-color 0.15s;
+    }
+    .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -32px; }
+    .reply-branch-toggle svg { width: 16px; height: 16px; pointer-events: none; }
+    .reply-branch-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
+    .reply-branch-toggle:hover, .reply-branch-toggle:focus-visible {
+      color: var(--new-accent); background: var(--new-pill-bg);
+    }
+    .reply-branch-toggle:focus-visible, .reply-collapsed-hint:focus-visible,
+    .reply-parent-link:focus-visible { outline: 2px solid var(--new-accent); outline-offset: 2px; }
     .reply-children.is-collapsed { display: none; }
-
-    /* cursor:auto 保留浏览器默认行为（文字上 I 型，空白处箭头）
-       只在左侧 20px 伪元素上设 pointer，与 JS 的 rect.left > 20 判断对齐 */
-    .reply-children.collapsible { cursor: auto; }
-    /* 导轨的 border-left 没了，容器 padding box 的左边缘就是导轨所在处，
-       点击热区从 left: 0 起算即可（原来要 -2px 去补那条边框的宽度） */
-    .reply-children.collapsible::before {
-      content: '';
-      position: absolute;
-      left: 0;
-      top: 0; bottom: 0;
-      width: 20px;
-      cursor: pointer;
-    }
-
     .reply-collapsed-hint {
-      display: none;
-      font-size: 11px; color: #999;
-      padding: 3px 8px 3px calc(var(--indent-width) + var(--rail-gap) + var(--rail-width));
-      cursor: pointer; user-select: none;
-      transition: color 0.15s;
+      display: none; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
+      padding: 12px 12px 12px 42px; border: 0; background: transparent;
+      color: #77838f; font: inherit; font-size: 12px;
+      text-align: left; cursor: pointer;
     }
     .reply-collapsed-hint:hover { color: var(--new-accent); }
-    .reply-children.is-collapsed + .reply-collapsed-hint { display: block; }
+    .reply-children.is-collapsed + .reply-collapsed-hint { display: flex; }
+    .reply-preview-avatars { display: inline-flex; padding-right: 4px; }
+    .reply-preview-avatars img {
+      width: 20px; height: 20px; object-fit: cover; border-radius: 4px;
+      margin-right: -4px;
+    }
+    .reply-wrapper > .cell > table { table-layout: fixed; }
+    .reply-wrapper .reply_content { overflow-wrap: anywhere; }
+    .reply-wrapper .reply_content pre { max-width: 100%; overflow-x: auto; }
+    .reply-wrapper .reply_content img { max-width: 100%; height: auto; }
+    .reply-wrapper .v2-reply-head { flex-wrap: wrap; }
+    .reply-wrapper .v2-reply-head .rh-meta { flex-wrap: wrap; white-space: normal; }
+    @media (max-width: 600px) {
+      .reply-children { margin-left: 28px; }
+      .reply-branch-toggle { width: 24px; left: 0; }
+      .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -28px; }
+      .reply-wrapper .v2-reply-head { gap: 4px 8px; }
+      .reply-wrapper .v2-reply-head .rh-gap { display: none; }
+      .reply-wrapper .v2-reply-head > .fr { order: 2; margin-left: auto !important; }
+      .reply-wrapper .v2-reply-head .rh-meta { order: 3; flex: 1 1 calc(100% - 80px); }
+      .reply-wrapper .v2-reply-head .reply-parent-link { order: 4; }
+      .reply-wrapper > .cell > table > tbody > tr > td:first-child { width: 32px; }
+    }
+    @media (pointer: coarse) {
+      .reply-branch-toggle { min-height: 28px; }
+      .reply-collapsed-hint { min-height: 44px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .reply-branch-toggle { transition: none; }
+    }
 
     /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
        之前自己写死的 #f5f5f5 在白底上几乎看不见 */
@@ -982,7 +984,7 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
-      --line-color: rgba(150, 150, 150, 0.5);
+      --line-color: #50555e;
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
@@ -1811,6 +1813,16 @@
       catch (err) { log('Collapse state error:', err); }
     }
 
+    function syncBranchToggle(childrenEl) {
+      const toggle = childrenEl.parentElement.querySelector(':scope > .reply-branch-toggle');
+      if (!toggle) return;
+      const expanded = !childrenEl.classList.contains('is-collapsed');
+      const label = expanded ? '收起此分支' : `展开 ${childrenEl.dataset.replyCount} 条回复`;
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.setAttribute('aria-label', label);
+      toggle.title = label;
+    }
+
     // j/k 或锚点跳转可能落在被折叠的子树里，滚动过去会看到"空白"。
     // 先展开沿途所有折叠祖先，并同步持久化状态。
     function revealAncestors(el) {
@@ -1825,6 +1837,7 @@
       const state = collapsed[collapsed.length - 1].closest('.box')?._v2CollapseState;
       for (const node of collapsed) {
         node.classList.remove('is-collapsed');
+        syncBranchToggle(node);
         state?.collapsedSet.delete(node.dataset.replyId);
       }
       if (state) saveCollapsedSet(state.topicId, state.collapsedSet);
@@ -1909,21 +1922,24 @@
           const state = container._v2CollapseState;
           if (!state) return;
 
+          const parentLink = e.target.closest?.('.reply-parent-link');
+          if (parentLink && container.contains(parentLink)) {
+            const target = document.getElementById(parentLink.hash.slice(1));
+            if (target) revealAncestors(target);
+            return;
+          }
+          const toggle = e.target.closest?.('.reply-branch-toggle');
           const clickedHint = e.target.closest?.('.reply-collapsed-hint');
           let childrenEl = null;
           let hint = null;
 
-          if (clickedHint && container.contains(clickedHint)) {
+          if (toggle && container.contains(toggle)) {
+            childrenEl = document.getElementById(toggle.getAttribute('aria-controls'));
+            hint = childrenEl?.nextElementSibling;
+          } else if (clickedHint && container.contains(clickedHint)) {
             hint = clickedHint;
             childrenEl = hint.previousElementSibling;
-          } else {
-            const clickedRail = e.target.closest?.('.reply-children.collapsible');
-            if (!clickedRail || !container.contains(clickedRail)) return;
-            const rect = clickedRail.getBoundingClientRect();
-            if (e.clientX - rect.left > 20) return;
-            childrenEl = clickedRail;
-            hint = childrenEl.nextElementSibling;
-          }
+          } else return;
 
           if (!childrenEl?.classList.contains('reply-children') || !hint?.classList.contains('reply-collapsed-hint')) return;
           e.preventDefault();
@@ -1931,40 +1947,95 @@
 
           const replyId = childrenEl.dataset.replyId;
           const nowCollapsed = childrenEl.classList.toggle('is-collapsed');
+          syncBranchToggle(childrenEl);
+          if (!nowCollapsed && clickedHint === document.activeElement) {
+            childrenEl.parentElement.querySelector(':scope > .reply-branch-toggle')?.focus({ preventScroll: true });
+          }
           if (nowCollapsed) state.collapsedSet.add(replyId);
           else state.collapsedSet.delete(replyId);
           saveCollapsedSet(state.topicId, state.collapsedSet);
-          hint.textContent = `▶ 展开 ${childrenEl.dataset.replyCount} 条回复`;
+
         });
       }
 
-      function appendNode(reply, parentEl) {
+      const counts = new Map();
+      function descendantCount(reply) {
+        if (!counts.has(reply)) counts.set(reply, reply.children.reduce((n, child) => n + 1 + descendantCount(child), 0));
+        return counts.get(reply);
+      }
+
+      function appendNode(reply, parentEl, depth = 0, parentReply = null) {
         const wrapper = document.createElement('div');
-        wrapper.className = 'reply-wrapper';
+        wrapper.className = 'reply-wrapper' + (depth >= 2 ? ' reply-branch-flat' : '');
+        wrapper.dataset.depth = String(depth);
         wrapper.dataset.replyId = reply.id;
         reply.element.classList.remove('inner');
         // 头部重排纯属美化，任何意外都不该连累整棵树
         try { layoutReplyHeader(reply.element); }
         catch (err) { log('楼层头部重排失败：', err); }
         wrapper.appendChild(reply.element);
+        reply.element.querySelector('.reply-context')?.remove();
+        reply.element.querySelector('.reply-parent-link')?.remove();
+        reply.element.querySelector('.reply-branch-toggle')?.remove();
+        if (parentReply) {
+          const link = document.createElement('a');
+          link.className = 'reply-parent-link';
+          link.href = `#${parentReply.element.id}`;
+          link.textContent = `回复 #${parentReply.floorNum}`;
+          link.title = `回复 ${parentReply.memberName} 的 #${parentReply.floorNum} 楼 · 第 ${depth} 层对话`;
+          const head = reply.element.querySelector('.v2-reply-head');
+          if (head) head.insertBefore(link, head.querySelector('.rh-gap'));
+          else reply.element.querySelector('.reply_content')?.before(link);
+        }
 
         if (reply.children.length > 0) {
-          const count      = reply.children.length;
+          const count = descendantCount(reply);
           const childrenEl = document.createElement('div');
-          childrenEl.className = 'reply-children collapsible';
+          childrenEl.className = 'reply-children collapsible' + (depth >= 2 ? ' reply-children-flat' : '');
+          childrenEl.dataset.depth = String(depth + 1);
+          childrenEl.id = `v2-children-${reply.id}`;
           childrenEl.dataset.replyId = reply.id;
           childrenEl.dataset.replyCount = String(count);
-          reply.children.forEach(child => appendNode(child, childrenEl));
+          reply.children.forEach(child => appendNode(child, childrenEl, depth + 1, reply));
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'reply-branch-toggle';
+          toggle.setAttribute('aria-controls', childrenEl.id);
+          toggle.setAttribute('aria-expanded', String(!collapsedSet.has(reply.id)));
+          // Heroicons mini chevron-down, MIT (Tailwind Labs). Static trusted icon.
+          toggle.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-slot="icon">   <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg>';
+          wrapper.appendChild(toggle);
 
-          const hint = document.createElement('div');
+          const hint = document.createElement('button');
+          hint.type = 'button';
           hint.className = 'reply-collapsed-hint';
-          hint.textContent = `▶ 展开 ${count} 条回复`;
+          hint.setAttribute('aria-controls', childrenEl.id);
+          const avatars = document.createElement('span');
+          avatars.className = 'reply-preview-avatars';
+          avatars.setAttribute('aria-hidden', 'true');
+          const names = new Set();
+          // A small representative sample; never copy arbitrary reply HTML.
+          for (const sample of [reply, ...reply.children]) {
+            if (!sample.memberAvatar || names.has(sample.memberName)) continue;
+            names.add(sample.memberName);
+            const avatar = document.createElement('img');
+            avatar.src = sample.memberAvatar;
+            avatar.alt = '';
+            avatar.loading = 'lazy';
+            avatars.appendChild(avatar);
+            if (names.size === 2) break;
+          }
+          if (avatars.childElementCount) hint.appendChild(avatars);
+          const label = document.createElement('span');
+          label.textContent = `展开 ${count} 条回复`;
+          hint.appendChild(label);
 
           // 恢复折叠状态
           if (collapsedSet.has(reply.id)) childrenEl.classList.add('is-collapsed');
 
           wrapper.appendChild(childrenEl);
           wrapper.appendChild(hint);
+          syncBranchToggle(childrenEl);
         }
         parentEl.appendChild(wrapper);
       }
