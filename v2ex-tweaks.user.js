@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.11
+// @version      2.5.12
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -85,6 +85,29 @@
   const log = (...args) => console.log('[V2EX-Enhance]', ...args);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+  // 合并增量扫描：祖先节点已覆盖后代时，只扫描一次；定时器不被持续变更推迟。
+  function createSubtreeBatch(process, wait = 150) {
+    const pending = new Set();
+    let timer = null;
+    function flush() {
+      timer = null;
+      const batch = new Set(pending);
+      pending.clear();
+      for (const node of batch) {
+        if (!node.isConnected) continue;
+        let covered = false;
+        for (let parent = node.parentNode; parent; parent = parent.parentNode) {
+          if (batch.has(parent)) { covered = true; break; }
+        }
+        if (!covered) process(node);
+      }
+    }
+    return node => {
+      pending.add(node);
+      if (timer === null) timer = setTimeout(flush, wait);
+    };
+  }
 
   function notify(title, text, timeout = 3500) {
     try { GM_notification({ title, text, timeout }); } catch (_) {}
@@ -1552,6 +1575,10 @@
 
     function processContent(contentEl) {
       if (!contentEl || contentEl.dataset.v2b64scanned === '1') return;
+      rescanContent(contentEl);
+    }
+
+    function rescanContent(contentEl) {
       processSubtree(contentEl);
       contentEl.dataset.v2b64scanned = '1';
     }
@@ -1567,8 +1594,10 @@
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-      if (node.matches(TARGET_SELECTOR)) processContent(node);
-      node.querySelectorAll(TARGET_SELECTOR).forEach(processContent);
+      // 合并后的根可能是已经扫描过、但随后又追加正文的容器。
+      // 重扫正文仍跳过已生成的解码控件，不能仅凭容器标记漏掉新增文本。
+      if (node.matches(TARGET_SELECTOR)) rescanContent(node);
+      node.querySelectorAll(TARGET_SELECTOR).forEach(rescanContent);
 
       const owner = node.closest(TARGET_SELECTOR);
       if (owner?.dataset.v2b64scanned === '1' && node !== owner) processSubtree(node);
@@ -1593,17 +1622,7 @@
           btn.classList.remove('copied');
         }, 1200);
       });
-      // 楼层树一次会搬进上千个节点，逐节点立即扫描会在同一批变更里重复
-      // 走满 querySelectorAll。用 Set 攒住新增根节点，防抖后统一处理；
-      // 同批里祖先覆盖后代、以及自己插入的解码结果，由既有幂等护栏去重。
-      const pendingRoots = new Set();
-      const flushScan = debounce(() => {
-        const roots = [...pendingRoots];
-        pendingRoots.clear();
-        for (const node of roots) {
-          if (node.isConnected) processAddedNode(node);
-        }
-      }, 150);
+      const enqueueScan = createSubtreeBatch(processAddedNode);
       new MutationObserver(mutations => {
         for (const mut of mutations) {
           for (const node of mut.addedNodes) {
@@ -1614,10 +1633,9 @@
             } else {
               continue;
             }
-            pendingRoots.add(node);
+            enqueueScan(node);
           }
         }
-        if (pendingRoots.size) flushScan();
       }).observe(root, { childList: true, subtree: true });
     }
     return { boot };
@@ -1814,7 +1832,7 @@
     }
 
     function syncBranchToggle(childrenEl) {
-      const toggle = childrenEl.parentElement.querySelector(':scope > .reply-branch-toggle');
+      const toggle = childrenEl._v2Toggle;
       if (!toggle) return;
       const expanded = !childrenEl.classList.contains('is-collapsed');
       const label = expanded ? '收起此分支' : `展开 ${childrenEl.dataset.replyCount} 条回复`;
@@ -1902,15 +1920,34 @@
       if (floor) head.appendChild(floor);
     }
 
+    // 先生成先序列表，再逆序累计后代数；两遍迭代都不消耗调用栈深度。
+    function buildReplyForest(flatReplies, maps) {
+      const roots = [];
+      const parents = new Map();
+      const counts = new Map();
+      for (const reply of flatReplies) { reply.children = []; counts.set(reply, 0); }
+      for (const reply of flatReplies) {
+        const parent = inferParent(reply, maps);
+        if (parent) { parent.children.push(reply); parents.set(reply, parent); }
+        else roots.push(reply);
+      }
+      const ordered = [];
+      const stack = roots.slice().reverse();
+      while (stack.length) {
+        const reply = stack.pop();
+        ordered.push(reply);
+        for (let i = reply.children.length - 1; i >= 0; i--) stack.push(reply.children[i]);
+      }
+      for (let i = ordered.length - 1; i >= 0; i--) {
+        const reply = ordered[i], parent = parents.get(reply);
+        if (parent) counts.set(parent, counts.get(parent) + 1 + counts.get(reply));
+      }
+      return { roots, counts };
+    }
+
     // ── 渲染树 ──
     function renderTree(flatReplies, maps, container, topicId) {
-      const roots = [];
-      flatReplies.forEach(r => { r.children = []; });
-      flatReplies.forEach(r => {
-        const parent = inferParent(r, maps);
-        if (parent) parent.children.push(r);
-        else roots.push(r);
-      });
+      const { roots, counts } = buildReplyForest(flatReplies, maps);
 
       const collapsedSet = getCollapsedSet(topicId);
       const fragment     = document.createDocumentFragment();
@@ -1949,7 +1986,7 @@
           const nowCollapsed = childrenEl.classList.toggle('is-collapsed');
           syncBranchToggle(childrenEl);
           if (!nowCollapsed && clickedHint === document.activeElement) {
-            childrenEl.parentElement.querySelector(':scope > .reply-branch-toggle')?.focus({ preventScroll: true });
+            childrenEl._v2Toggle?.focus({ preventScroll: true });
           }
           if (nowCollapsed) state.collapsedSet.add(replyId);
           else state.collapsedSet.delete(replyId);
@@ -1958,11 +1995,8 @@
         });
       }
 
-      const counts = new Map();
-      function descendantCount(reply) {
-        if (!counts.has(reply)) counts.set(reply, reply.children.reduce((n, child) => n + 1 + descendantCount(child), 0));
-        return counts.get(reply);
-      }
+      const iconTemplate = document.createElement('template');
+      iconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-slot="icon">   <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg>';
 
       function appendNode(reply, parentEl, depth = 0, parentReply = null) {
         const wrapper = document.createElement('div');
@@ -1989,21 +2023,21 @@
         }
 
         if (reply.children.length > 0) {
-          const count = descendantCount(reply);
+          const count = counts.get(reply);
           const childrenEl = document.createElement('div');
           childrenEl.className = 'reply-children collapsible' + (depth >= 2 ? ' reply-children-flat' : '');
           childrenEl.dataset.depth = String(depth + 1);
           childrenEl.id = `v2-children-${reply.id}`;
           childrenEl.dataset.replyId = reply.id;
           childrenEl.dataset.replyCount = String(count);
-          reply.children.forEach(child => appendNode(child, childrenEl, depth + 1, reply));
+
           const toggle = document.createElement('button');
           toggle.type = 'button';
           toggle.className = 'reply-branch-toggle';
           toggle.setAttribute('aria-controls', childrenEl.id);
           toggle.setAttribute('aria-expanded', String(!collapsedSet.has(reply.id)));
           // Heroicons mini chevron-down, MIT (Tailwind Labs). Static trusted icon.
-          toggle.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-slot="icon">   <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg>';
+          toggle.appendChild(iconTemplate.content.cloneNode(true));
           wrapper.appendChild(toggle);
 
           const hint = document.createElement('button');
@@ -2033,15 +2067,26 @@
           // 恢复折叠状态
           if (collapsedSet.has(reply.id)) childrenEl.classList.add('is-collapsed');
 
+          wrapper._v2Children = childrenEl;
+          childrenEl._v2Toggle = toggle;
           wrapper.appendChild(childrenEl);
           wrapper.appendChild(hint);
           syncBranchToggle(childrenEl);
         }
         parentEl.appendChild(wrapper);
+        return wrapper;
       }
 
       try {
-        roots.forEach(r => appendNode(r, fragment));
+        const stack = roots.slice().reverse().map(reply => ({ reply, parentEl: fragment, depth: 0, parent: null }));
+        while (stack.length) {
+          const { reply, parentEl, depth, parent } = stack.pop();
+          const wrapper = appendNode(reply, parentEl, depth, parent);
+          const childrenEl = wrapper._v2Children;
+          for (let i = reply.children.length - 1; i >= 0; i--) {
+            stack.push({ reply: reply.children[i], parentEl: childrenEl, depth: depth + 1, parent: reply });
+          }
+        }
       } catch (err) {
         // 兜底：宁可平铺显示，也不能因为建树失败把回复弄丢
         // （楼层此时已被搬进 fragment，直接放弃会导致整页回复消失）
@@ -2051,6 +2096,7 @@
       }
       container.innerHTML = '';
       container.appendChild(fragment);
+      document.dispatchEvent(new Event('v2ex:replies-updated'));
     }
 
     // ── 未读标记 ──
@@ -2080,6 +2126,7 @@
         // 楼层号节点在解析阶段就拿到了，不必再 querySelector 一遍
         if (r.floorEl) r.floorEl.title = '未读新回复';
       }
+      if (newCount) document.dispatchEvent(new Event('v2ex:replies-updated'));
       return newCount;
     }
 
@@ -2774,6 +2821,7 @@
   const NavKeys = (() => {
     const SCROLL_OFFSET_RATIO = CONFIG.nav.scrollOffsetRatio;
     let newReplies = [], curIndex = -1, hudTimer = null, activeReply = null;
+    let listDirty = true;
 
     // HUD 每次按键都重建 innerHTML 的话，等于每次都重新解析一遍 HTML；
     // 结构建一次留着，之后只改箭头和计数两处文本。
@@ -2817,11 +2865,13 @@
       window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
     }
     function setActive(el) {
-      document.querySelector('.reply-nav-active')?.classList.remove('reply-nav-active');
+      if (activeReply) (activeReply.closest('.reply-wrapper') || activeReply).classList.remove('reply-nav-active');
       activeReply = el || null;
       if (el) (el.closest('.reply-wrapper') || el).classList.add('reply-nav-active');
     }
     function refreshList() {
+      if (!listDirty) return;
+      listDirty = false;
       newReplies = Array.from(document.querySelectorAll('.reply-new'));
       const activeIndex = activeReply ? newReplies.indexOf(activeReply) : -1;
       curIndex = activeIndex >= 0 ? activeIndex : -1;
@@ -2853,6 +2903,7 @@
     }
     function boot() {
       if (!isTopicPage()) return;
+      document.addEventListener('v2ex:replies-updated', () => { listDirty = true; });
       document.addEventListener('keydown', onKeyDown);
     }
     return { boot };
@@ -2905,10 +2956,13 @@
       // Imgur 图只出现在话题/回复正文里：初始 scanAll 保持全页兜底，
       // 增量观察则收窄到 #Main，避免头部/头像 src 抖动触发无谓回调。
       const root = document.querySelector('#Main') || document.body;
+      const enqueueImages = createSubtreeBatch(processNode, 0);
       new MutationObserver(mutations => {
         for (const mutation of mutations) {
-          if (mutation.type === 'attributes') processImage(mutation.target);
-          else for (const node of mutation.addedNodes) processNode(node);
+          if (mutation.type === 'attributes') enqueueImages(mutation.target);
+          else for (const node of mutation.addedNodes) {
+            if (node.nodeType === Node.ELEMENT_NODE) enqueueImages(node);
+          }
         }
       }).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
     }
@@ -4179,18 +4233,7 @@
         if (Editor.isOpen() && !e.target.closest?.('.v2t-chip, .v2t-add, #v2t-editor, .v2t-color-orbit')) Editor.close();
       });
 
-      // 只扫新插入的子树，不做全文档 rescan：楼层树一次会搬进上千个节点，
-      // 每批变更都重扫整页的话，光 querySelectorAll 就要走满整棵 DOM。
-      // 用 Set 攒住待扫根节点，防抖后统一处理（同一批里祖先覆盖后代，重复由
-      // attachSlot 的 data-v2t-bound 挡掉）。
-      const pendingRoots = new Set();
-      const flushDecorate = debounce(() => {
-        const roots = [...pendingRoots];
-        pendingRoots.clear();
-        for (const node of roots) {
-          if (node.isConnected) decorate(node);
-        }
-      }, 150);
+      const enqueueDecorate = createSubtreeBatch(decorate);
       const root = document.getElementById('Main') || document.body;
       new MutationObserver(records => {
         for (const record of records) {
@@ -4200,10 +4243,9 @@
             if (node.nodeType !== Node.ELEMENT_NODE) continue;
             if (node.classList.contains('v2t-slot')) continue;
             if (node.parentElement?.classList.contains('v2t-slot')) continue;
-            pendingRoots.add(node);
+            enqueueDecorate(node);
           }
         }
-        if (pendingRoots.size) flushDecorate();
       }).observe(root, { childList: true, subtree: true });
 
       // 其它标签页改动标签后同步刷新
