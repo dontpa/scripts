@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.12
+// @version      2.5.13
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -687,6 +687,65 @@
       .reply-branch-toggle { transition: none; }
     }
 
+    /* 分支色只用于局部区分；深度不继续占用正文宽度，也不常驻数字。 */
+    :root {
+      --reply-tone-0: #557c9d; --reply-tone-1: #487f77;
+      --reply-tone-2: #906c95; --reply-tone-3: #a37845;
+    }
+    .reply-children > .reply-wrapper::after { border-color: var(--rail-tone); }
+    .reply-children-flat > .reply-rail-continuation::after { display: none; }
+    .reply-children-flat > .reply-rail-continuation::before {
+      height: auto; bottom: 0; border-left-style: solid;
+    }
+    .reply-children-flat > .reply-rail-fork::after { display: block; border-left-style: solid; width: 18px; }
+    .reply-children > .reply-wrapper > .cell::before {
+      content: ''; position: absolute; left: -16px; top: 0; bottom: 0;
+      border-left: 2px solid var(--rail-tone); opacity: .55; pointer-events: none;
+    }
+    .reply-children > .reply-on-path > .cell::before { opacity: .85; }
+    .reply-children > .reply-path-selected > .cell::before { opacity: 1; border-left-width: 3px; }
+    .reply-path-selected > .cell { background: var(--bg-hover) !important; }
+    .reply-branch-return > .cell { border-top: 1px solid var(--line-color); padding-top: 18px !important; }
+    .reply-branch-return > .cell .reply-parent-link { color: var(--rail-tone) !important; font-weight: 500; }
+    .reply-rail-continuation > .reply-branch-toggle { opacity: .35; }
+    .reply-rail-continuation > .reply-branch-toggle:hover,
+    .reply-rail-continuation > .reply-branch-toggle:focus-visible { opacity: 1; }
+    .reply-path-trigger {
+      display: inline-block; border: 0; background: none; padding: 2px 5px;
+      font-family: inherit; font-size: 11px; line-height: 1.6; color: #7d8994; cursor: pointer;
+    }
+    .reply-rail-target {
+      position: absolute; left: -28px; top: 14px; width: 26px; height: 30px;
+      border: 0; padding: 0; background: transparent; cursor: pointer; border-radius: 4px;
+    }
+    .reply-path-trigger:focus-visible, .reply-rail-target:focus-visible, .reply-path button:focus-visible {
+      outline: 2px solid var(--rail-tone, var(--new-accent)); outline-offset: 2px;
+    }
+    .reply-path {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 4px; max-width: 100%;
+      padding: 7px 0 8px; margin-bottom: 4px; font-size: 12px; line-height: 1.6; color: var(--new-accent);
+    }
+    .reply-path button {
+      font: inherit; border: 0; background: none; color: var(--new-accent);
+      padding: 2px 5px; cursor: pointer; border-radius: 3px;
+    }
+    .reply-path button:hover { background: var(--new-pill-bg); }
+    .reply-path > button:not(:last-child)::after { content: '›'; color: #a2b0c0; margin-left: 7px; }
+    .reply-path > button:last-child { margin-left: auto; color: #8795a5; }
+    .reply-path strong { font-size: 12px; }
+    .reply-path-caption { color: #8795a5; margin-right: 5px; }
+    .reply-path-all {
+      display: flex; flex-wrap: wrap; gap: 3px; flex-basis: 100%; max-height: 140px;
+      overflow: auto; background: var(--bg-hover); border-radius: 4px; padding: 8px;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .reply-path-trigger { opacity: 0; pointer-events: none; }
+      .v2-reply-head:hover .reply-path-trigger, .v2-reply-head:focus-within .reply-path-trigger,
+      .reply-path-trigger:focus-visible { opacity: 1; pointer-events: auto; }
+    }
+    @media (max-width: 600px) { .reply-path-trigger { order: 4; } }
+    @media (pointer: coarse) { .reply-path-trigger { min-height: 30px; padding-inline: 8px; } }
+
     /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
        之前自己写死的 #f5f5f5 在白底上几乎看不见 */
     .reply-wrapper .cell {
@@ -1007,6 +1066,8 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
+      --reply-tone-0: #8eb1d0; --reply-tone-1: #8ab9af;
+      --reply-tone-2: #b69ac1; --reply-tone-3: #c5a174;
       --line-color: #50555e;
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
@@ -1945,8 +2006,73 @@
       return { roots, counts };
     }
 
+    // 路径状态只属于当前回复容器；按需构建，沿直接父引用迭代追溯。
+    function clearReplyPath(container, restoreFocus = false) {
+      const state = container._v2PathState;
+      if (!state) return;
+      for (const wrapper of state.path) wrapper.classList.remove('reply-on-path', 'reply-path-selected');
+      state.row.remove();
+      container._v2PathState = null;
+      if (restoreFocus && state.trigger?.isConnected) state.trigger.focus({ preventScroll: true });
+    }
+
+    function showReplyPath(container, wrapper, trigger, jump = false) {
+      clearReplyPath(container);
+      const path = [];
+      for (let node = wrapper; node; node = node._v2Parent) path.push(node);
+      path.reverse();
+      for (const node of path) node.classList.add('reply-on-path');
+      wrapper.classList.add('reply-path-selected');
+      const row = document.createElement('nav');
+      row.className = 'reply-path';
+      row.setAttribute('aria-label', '当前回复的祖先路径');
+      const caption = document.createElement('span');
+      caption.className = 'reply-path-caption';
+      caption.textContent = `第 ${path.length - 1} 层对话`;
+      row.appendChild(caption);
+      const makeLink = node => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.pathAction = 'jump';
+        button._v2Target = node;
+        button.textContent = `#${node._v2Floor}`;
+        button.setAttribute('aria-label', `定位第 ${node._v2Floor} 楼`);
+        return button;
+      };
+      const ancestors = path.slice(0, -1);
+      if (ancestors.length > 4) {
+        row.appendChild(makeLink(ancestors[0]));
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.dataset.pathAction = 'more';
+        more.textContent = `… ${ancestors.length - 3} 层`;
+        more.setAttribute('aria-label', '展开中间的祖先楼层');
+        row.appendChild(more);
+        ancestors.slice(-2).forEach(node => row.appendChild(makeLink(node)));
+      } else ancestors.forEach(node => row.appendChild(makeLink(node)));
+      const current = document.createElement('strong');
+      current.textContent = `#${wrapper._v2Floor}`;
+      row.appendChild(current);
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.dataset.pathAction = 'close';
+      close.textContent = '关闭';
+      close.setAttribute('aria-label', '关闭路径');
+      row.appendChild(close);
+      wrapper._v2Cell.querySelector('.reply_content').before(row);
+      container._v2PathState = { path, row, trigger, makeLink, ancestors };
+      revealAncestors(wrapper._v2Cell);
+      if (jump) {
+        wrapper._v2Cell.scrollIntoView({ block: 'center' });
+        const focusTarget = wrapper._v2PathTrigger || wrapper._v2Cell;
+        if (!wrapper._v2PathTrigger) focusTarget.tabIndex = -1;
+        focusTarget.focus({ preventScroll: true });
+      }
+    }
+
     // ── 渲染树 ──
     function renderTree(flatReplies, maps, container, topicId) {
+      clearReplyPath(container);
       const { roots, counts } = buildReplyForest(flatReplies, maps);
 
       const collapsedSet = getCollapsedSet(topicId);
@@ -1955,10 +2081,37 @@
       container._v2CollapseState = { topicId, collapsedSet };
       if (!container._v2CollapseBound) {
         container._v2CollapseBound = true;
+        container.addEventListener('keydown', e => {
+          if (e.key === 'Escape' && container._v2PathState) {
+            e.preventDefault();
+            clearReplyPath(container, true);
+          }
+        });
         container.addEventListener('click', e => {
           const state = container._v2CollapseState;
           if (!state) return;
 
+          const pathTrigger = e.target.closest?.('.reply-path-trigger, .reply-rail-target');
+          if (pathTrigger && container.contains(pathTrigger)) {
+            showReplyPath(container, pathTrigger.closest('.reply-wrapper'), pathTrigger);
+            return;
+          }
+          const action = e.target.closest?.('[data-path-action]');
+          const pathState = container._v2PathState;
+          if (action && pathState?.row.contains(action)) {
+            if (action.dataset.pathAction === 'close') clearReplyPath(container, true);
+            else if (action.dataset.pathAction === 'jump') {
+              const target = action._v2Target;
+              showReplyPath(container, target, target._v2PathTrigger || target._v2Cell, true);
+            } else if (action.dataset.pathAction === 'more') {
+              const list = document.createElement('div');
+              list.className = 'reply-path-all';
+              pathState.ancestors.slice(1, -2).forEach(node => list.appendChild(pathState.makeLink(node)));
+              action.replaceWith(list);
+              list.firstElementChild?.focus({ preventScroll: true });
+            }
+            return;
+          }
           const parentLink = e.target.closest?.('.reply-parent-link');
           if (parentLink && container.contains(parentLink)) {
             const target = document.getElementById(parentLink.hash.slice(1));
@@ -1984,6 +2137,9 @@
 
           const replyId = childrenEl.dataset.replyId;
           const nowCollapsed = childrenEl.classList.toggle('is-collapsed');
+          if (nowCollapsed && container._v2PathState && childrenEl.contains(container._v2PathState.row)) {
+            clearReplyPath(container);
+          }
           syncBranchToggle(childrenEl);
           if (!nowCollapsed && clickedHint === document.activeElement) {
             childrenEl._v2Toggle?.focus({ preventScroll: true });
@@ -1998,11 +2154,26 @@
       const iconTemplate = document.createElement('template');
       iconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-slot="icon">   <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg>';
 
-      function appendNode(reply, parentEl, depth = 0, parentReply = null) {
+      let paletteCursor = 0;
+      function appendNode(reply, parentEl, depth = 0, parentReply = null, siblingIndex = 0, siblingCount = 1) {
         const wrapper = document.createElement('div');
         wrapper.className = 'reply-wrapper' + (depth >= 2 ? ' reply-branch-flat' : '');
         wrapper.dataset.depth = String(depth);
         wrapper.dataset.replyId = reply.id;
+        const parentWrapper = parentEl._v2Wrapper || null;
+        let tone = parentWrapper ? parentWrapper._v2Tone : 0;
+        if (siblingIndex > 0) {
+          tone = (++paletteCursor) % 4;
+          if (parentWrapper && tone === parentWrapper._v2Tone) tone = (++paletteCursor) % 4;
+        }
+        wrapper._v2Tone = tone;
+        wrapper.style.setProperty('--rail-tone', `var(--reply-tone-${tone})`);
+        wrapper._v2Parent = parentWrapper;
+        wrapper._v2Floor = reply.floorNum;
+        wrapper._v2Cell = reply.element;
+        if (depth > 2) wrapper.classList.add('reply-rail-continuation');
+        if (parentReply && siblingCount > 1) wrapper.classList.add('reply-rail-fork');
+        if (parentReply && siblingIndex > 0) wrapper.classList.add('reply-branch-return');
         reply.element.classList.remove('inner');
         // 头部重排纯属美化，任何意外都不该连累整棵树
         try { layoutReplyHeader(reply.element); }
@@ -2011,15 +2182,29 @@
         reply.element.querySelector('.reply-context')?.remove();
         reply.element.querySelector('.reply-parent-link')?.remove();
         reply.element.querySelector('.reply-branch-toggle')?.remove();
+        reply.element.querySelectorAll('.reply-path-trigger, .reply-rail-target, .reply-path').forEach(node => node.remove());
         if (parentReply) {
           const link = document.createElement('a');
           link.className = 'reply-parent-link';
           link.href = `#${parentReply.element.id}`;
-          link.textContent = `回复 #${parentReply.floorNum}`;
+          link.textContent = `${siblingIndex > 0 ? '另一个分支 · ' : ''}回复 #${parentReply.floorNum}`;
           link.title = `回复 ${parentReply.memberName} 的 #${parentReply.floorNum} 楼 · 第 ${depth} 层对话`;
           const head = reply.element.querySelector('.v2-reply-head');
           if (head) head.insertBefore(link, head.querySelector('.rh-gap'));
           else reply.element.querySelector('.reply_content')?.before(link);
+          const pathTrigger = document.createElement('button');
+          pathTrigger.type = 'button';
+          pathTrigger.className = 'reply-path-trigger';
+          pathTrigger.textContent = '路径';
+          pathTrigger.setAttribute('aria-label', `查看第 ${reply.floorNum} 楼的回复路径`);
+          link.after(pathTrigger);
+          wrapper._v2PathTrigger = pathTrigger;
+          const railTarget = document.createElement('button');
+          railTarget.type = 'button';
+          railTarget.className = 'reply-rail-target';
+          railTarget.setAttribute('aria-label', `第 ${depth} 层对话，查看第 ${reply.floorNum} 楼的回复路径`);
+          railTarget.title = `第 ${depth} 层对话 · 回复 #${parentReply.floorNum} · 点击查看路径`;
+          reply.element.appendChild(railTarget);
         }
 
         if (reply.children.length > 0) {
@@ -2067,6 +2252,7 @@
           // 恢复折叠状态
           if (collapsedSet.has(reply.id)) childrenEl.classList.add('is-collapsed');
 
+          childrenEl._v2Wrapper = wrapper;
           wrapper._v2Children = childrenEl;
           childrenEl._v2Toggle = toggle;
           wrapper.appendChild(childrenEl);
@@ -2078,13 +2264,13 @@
       }
 
       try {
-        const stack = roots.slice().reverse().map(reply => ({ reply, parentEl: fragment, depth: 0, parent: null }));
+        const stack = roots.map((reply, i) => ({ reply, parentEl: fragment, depth: 0, parent: null, siblingIndex: i, siblingCount: roots.length })).reverse();
         while (stack.length) {
-          const { reply, parentEl, depth, parent } = stack.pop();
-          const wrapper = appendNode(reply, parentEl, depth, parent);
+          const { reply, parentEl, depth, parent, siblingIndex, siblingCount } = stack.pop();
+          const wrapper = appendNode(reply, parentEl, depth, parent, siblingIndex, siblingCount);
           const childrenEl = wrapper._v2Children;
           for (let i = reply.children.length - 1; i >= 0; i--) {
-            stack.push({ reply: reply.children[i], parentEl: childrenEl, depth: depth + 1, parent: reply });
+            stack.push({ reply: reply.children[i], parentEl: childrenEl, depth: depth + 1, parent: reply, siblingIndex: i, siblingCount: reply.children.length });
           }
         }
       } catch (err) {
