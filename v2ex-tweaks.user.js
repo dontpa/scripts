@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.16
+// @version      2.5.17
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -587,10 +587,12 @@
       --rail-gap: 13px;      /* 竖导轨到子回复左边缘的横向距离 = 肘接横线的长度 */
       --rail-width: 1px;     /* 1px 的细线比 2px 干净得多，靠透明度补可见性 */
       --elbow-top: 19px;     /* 肘接横线的高度，对准子回复头像的上半部 */
-      --line-color: #d3d8de;
+      --line-color: #b5bfc9;
       --line-hover: #7fa0f5;
       --bg-hover: #fafbff;
       --new-accent: #4a7af0;
+      --reply-muted: #687480;
+      --reply-surface: var(--box-background-color, #fff);
       /* 未读药丸走"淡底 + 同色字"，不再是整块实心蓝：
          一屏几十个实心色块会盖过正文，淡底同样能一眼扫出来。 */
       --new-pill-bg: rgba(74, 122, 240, 0.15);
@@ -609,12 +611,12 @@
     .reply-children > .reply-wrapper::after {
       content: ''; position: absolute; pointer-events: none; box-sizing: border-box;
     }
-    /* 每组直接子回复共用一根竖线，末项在头像中线处收尾。 */
+    /* 同级回复共用竖线；末项在圆弧起点收住，不能穿过圆弧形成多余的尾巴。 */
     .reply-children > .reply-wrapper::before {
       left: -16px; top: 0; bottom: 0;
       border-left: 1px solid var(--branch-ink);
     }
-    .reply-children > .reply-wrapper:last-child::before { bottom: auto; height: 30px; }
+    .reply-children > .reply-wrapper:last-child::before { bottom: auto; height: 22px; }
     .reply-children > .reply-wrapper::after {
       left: -16px; top: 22px; width: 20px; height: 8px;
       border-left: 1px solid var(--branch-ink); border-bottom: 1px solid var(--branch-ink);
@@ -629,9 +631,11 @@
     }
     .reply-parent-link {
       display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
-      flex: 0 0 auto; font-size: 11px; color: #77838f !important;
+      flex: 0 0 auto; font-size: 12px; color: var(--reply-muted) !important;
       padding: 2px 4px; border-radius: 4px; line-height: 1.6;
       text-decoration: none; white-space: nowrap;
+      font-variant-numeric: tabular-nums; touch-action: manipulation;
+      transition: color 150ms ease, background-color 150ms ease;
     }
     .reply-parent-link svg { width: 14px; height: 14px; flex: none; pointer-events: none; }
     .reply-parent-link:hover, .reply-parent-link:focus-visible {
@@ -642,11 +646,12 @@
       position: relative; left: 0; z-index: 1;
       display: grid; place-items: center; width: 32px; height: 28px;
       margin: -14px 0; border: 0; border-radius: 50%; padding: 0;
-      color: #77838f; background: var(--box-background-color, #fff); cursor: pointer;
+      color: var(--reply-muted); background: var(--reply-surface); cursor: pointer;
+      touch-action: manipulation;
       transition: color 0.15s, background-color 0.15s;
     }
     .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -32px; }
-    .reply-branch-toggle svg { width: 16px; height: 16px; pointer-events: none; }
+    .reply-branch-toggle svg { width: 16px; height: 16px; pointer-events: none; transition: transform 150ms ease; }
     .reply-branch-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
     .reply-branch-toggle:hover, .reply-branch-toggle:focus-visible {
       color: var(--new-accent); background: var(--new-pill-bg);
@@ -657,10 +662,17 @@
     .reply-collapsed-hint {
       display: none; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
       padding: 12px 12px 12px 42px; border: 0; background: transparent;
-      color: #77838f; font: inherit; font-size: 12px;
+      color: var(--reply-muted); font: inherit; font-size: 12px;
+      line-height: 1.6; touch-action: manipulation; border-radius: 4px;
+      transition: color 150ms ease, background-color 150ms ease;
       text-align: left; cursor: pointer;
     }
-    .reply-collapsed-hint:hover { color: var(--new-accent); }
+    .reply-collapsed-hint:hover, .reply-collapsed-hint:focus-visible {
+      color: var(--new-accent); background: var(--bg-hover);
+    }
+    .reply-parent-link:active, .reply-branch-toggle:active, .reply-collapsed-hint:active {
+      background: var(--new-pill-bg);
+    }
     .reply-children.is-collapsed + .reply-collapsed-hint { display: flex; }
     .reply-preview-avatars { display: inline-flex; padding-right: 4px; }
     .reply-preview-avatars img {
@@ -672,7 +684,13 @@
     .reply-wrapper .reply_content pre { max-width: 100%; overflow-x: auto; }
     .reply-wrapper .reply_content img { max-width: 100%; height: auto; }
     .reply-wrapper .v2-reply-head { flex-wrap: wrap; }
-    .reply-wrapper .v2-reply-head .rh-meta { flex-wrap: wrap; white-space: normal; }
+    .reply-wrapper .v2-reply-head .rh-meta {
+      flex: 0 1 auto; min-width: 0; flex-wrap: wrap; white-space: normal; gap: 4px 8px;
+      color: var(--reply-muted); overflow-wrap: anywhere;
+    }
+    .reply-wrapper .v2-reply-head .ago, .reply-wrapper .v2-reply-head .fade {
+      color: var(--reply-muted); font-size: 12px !important; line-height: 1.5;
+    }
     @media (max-width: 600px) {
       .reply-children { margin-left: 28px; }
       .reply-branch-toggle { width: 24px; left: 0; }
@@ -685,24 +703,24 @@
       .reply-wrapper > .cell > table > tbody > tr > td:first-child { width: 32px; }
     }
     @media (pointer: coarse) {
-      .reply-branch-toggle { min-height: 28px; }
+      .reply-branch-toggle { width: 44px; height: 44px; margin-block: -22px; left: -6px; }
+      .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -38px; }
+      .reply-parent-link { min-width: 44px; min-height: 44px; box-sizing: border-box; justify-content: center; }
       .reply-collapsed-hint { min-height: 44px; }
     }
-    @media (prefers-reduced-motion: reduce) {
-      .reply-branch-toggle { transition: none; }
+
+    @media (pointer: coarse) and (max-width: 600px) {
+      .reply-branch-toggle { left: -10px; }
     }
 
     /* 分支色只用于局部区分；深度不继续占用正文宽度，也不常驻数字。 */
     :root {
-      --reply-tone-0: #557c9d; --reply-tone-1: #487f77;
-      --reply-tone-2: #906c95; --reply-tone-3: #a37845;
+      --reply-tone-0: #466b8f; --reply-tone-1: #347468;
+      --reply-tone-2: #825886; --reply-tone-3: #92622e;
     }
     .reply-children > .reply-wrapper::after { border-color: var(--rail-tone); }
     /* 导轨只由 wrapper 绘制；不在带未读边框的 cell 上重复画线。 */
     .reply-branch-return > .cell .reply-parent-link { color: var(--rail-tone) !important; font-weight: 500; }
-    .reply-rail-continuation > .reply-branch-toggle { opacity: .35; }
-    .reply-rail-continuation > .reply-branch-toggle:hover,
-    .reply-rail-continuation > .reply-branch-toggle:focus-visible { opacity: 1; }
     /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
        之前自己写死的 #f5f5f5 在白底上几乎看不见 */
     .reply-wrapper .cell {
@@ -711,7 +729,9 @@
       background: transparent;
       transition: background 0.12s;
     }
-    .reply-wrapper > .cell:hover { background-color: var(--bg-hover); }
+    @media (hover: hover) and (pointer: fine) {
+      .reply-wrapper > .cell:hover { background-color: var(--bg-hover); }
+    }
     .reply-wrapper .avatar {
       display: block;
       width: 100% !important; min-width: 0 !important; max-width: 100% !important;
@@ -727,7 +747,7 @@
        时间保持 V2EX 原来的位置——紧跟用户名，宽度随内容，不占定宽列。
        [用户名 ●标签] [时间 ♥95] ——弹性留白—— [♥ ↩] [19]
        弹性留白吃掉所有宽度差，右端那组按钮 + 楼层号整体贴住行右边缘。 */
-    .v2-reply-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .v2-reply-head { display: flex; align-items: center; gap: 4px 8px; min-width: 0; }
     .v2-reply-head .rh-id {
       display: flex; align-items: center; gap: 4px;
       flex: 0 1 auto; min-width: 0;
@@ -764,17 +784,17 @@
     .reply-wrapper .fr .no {
       display: inline-flex !important; align-items: center; justify-content: center;
       box-sizing: border-box;
-      min-width: 24px; height: 17px; padding: 0 6px !important;
+      min-width: 28px; height: 20px; padding: 0 6px !important;
       margin-left: 2px;
-      font-size: 10px !important; font-weight: 600; line-height: 1 !important;
+      font-size: 11px !important; font-weight: 600; line-height: 1 !important;
       font-variant-numeric: tabular-nums; letter-spacing: 0.3px;
-      color: #b9bdc4 !important; background: transparent !important;
+      color: var(--reply-muted) !important; background: transparent !important;
       border: 1px solid transparent; border-radius: 9px !important;
       transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
     }
     /* 悬停整行时轻轻浮出来，方便定位/复制楼层号 */
     .reply-wrapper > .cell:hover .fr .no {
-      color: #8b9098 !important; border-color: rgba(0, 0, 0, 0.09);
+      color: var(--reply-muted) !important; border-color: rgba(0, 0, 0, 0.09);
     }
 
     /* 未读行只留左边一条蓝竖条，不铺任何底色——扫读靠这条竖条，
@@ -1023,18 +1043,20 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
-      --reply-tone-0: #8eb1d0; --reply-tone-1: #8ab9af;
-      --reply-tone-2: #b69ac1; --reply-tone-3: #c5a174;
+      --reply-tone-0: #8daed0; --reply-tone-1: #74b4a0;
+      --reply-tone-2: #bc91bf; --reply-tone-3: #c8a16f;
       --line-color: #50555e;
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
+      --reply-muted: #a4adb9;
+      --reply-surface: var(--box-background-color, #23252b);
       --new-pill-bg: rgba(111, 151, 255, 0.18);
       --new-pill-fg: #9fb8ff;
       --new-pill-bd: rgba(111, 151, 255, 0.32);
     }
     #Wrapper.Night .reply-wrapper .cell { border-bottom-color: #303239 !important; }
-    #Wrapper.Night .reply-wrapper .fr .no { color: #676c75 !important; }
+    #Wrapper.Night .reply-wrapper .fr .no { color: var(--reply-muted) !important; }
     #Wrapper.Night .reply-wrapper > .cell:hover .fr .no {
       color: #9aa1ab !important; border-color: rgba(255, 255, 255, 0.13);
     }
@@ -1046,7 +1068,7 @@
       background: var(--new-pill-bg) !important;
       border-color: var(--new-pill-bd);
     }
-    #Wrapper.Night .reply-collapsed-hint { color: #7b818c; }
+    #Wrapper.Night .reply-collapsed-hint { color: var(--reply-muted); }
     #Wrapper.Night #v2ex-new-count-bar {
       background: linear-gradient(90deg, #262b3a 0%, #23252b 100%);
       border-bottom-color: #343a4d; color: #93a6d8;
@@ -1070,6 +1092,13 @@
     #Wrapper.Night .card-content { color: #d3d7de; }
     #Wrapper.Night .card-content pre { background: #1c1e23; border-color: #303239; }
     #Wrapper.Night .floor-tag { background: #2b2e35; color: #7b818c; }
+    @media (prefers-reduced-motion: reduce) {
+      .reply-wrapper .cell, .reply-wrapper .fr .no, .reply-parent-link,
+      .reply-branch-toggle, .reply-branch-toggle svg, .reply-collapsed-hint {
+        transition: none !important;
+      }
+      .cell.reply-new { animation: none !important; }
+    }
   `);
 
   // =========================
