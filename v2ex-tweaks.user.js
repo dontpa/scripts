@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.18
+// @version      2.5.19
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -602,9 +602,10 @@
     .box { padding-bottom: 0 !important; }
 
     /* 导轨位于子树缩进区，原始回复单元不为控件预留空列。 */
-    .reply-children { margin-left: 32px; padding-left: 0; }
+    /* 主干继承父分支色，首条回复沿用此色；新的分叉只在弯线处换色。 */
+    .reply-children { margin-left: 32px; padding-left: 0; --branch-ink: var(--rail-tone, var(--line-color)); }
     .reply-children.reply-children-flat { margin-left: 0; }
-    .reply-wrapper { position: relative; --branch-ink: var(--line-color); }
+    .reply-wrapper { position: relative; }
     .reply-wrapper > .cell { position: relative; }
     .reply-children > .reply-wrapper::before,
     .reply-children > .reply-wrapper::after {
@@ -624,13 +625,9 @@
     /* 缩进封顶后用楼层链接表达关系，避免各层导轨在同一横坐标重叠。 */
     .reply-children-flat > .reply-wrapper::before,
     .reply-children-flat > .reply-wrapper::after { display: none; }
-    .reply-wrapper:has(> .reply-branch-toggle:hover) > .reply-children > .reply-wrapper,
-    .reply-wrapper:has(> .reply-branch-toggle:focus-visible) > .reply-children > .reply-wrapper {
-      --branch-ink: var(--line-hover);
-    }
     .reply-parent-link {
       display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
-      flex: 0 0 auto; font-size: 12px; color: var(--reply-muted) !important;
+      flex: 0 0 auto; font-size: 12px; color: var(--rail-tone, var(--reply-muted)) !important;
       padding: 2px 4px; border-radius: 4px; line-height: 1.6;
       text-decoration: none; white-space: nowrap;
       font-variant-numeric: tabular-nums; touch-action: manipulation;
@@ -638,7 +635,8 @@
     }
     .reply-parent-link svg { width: 14px; height: 14px; flex: none; pointer-events: none; }
     .reply-parent-link:hover, .reply-parent-link:focus-visible {
-      color: var(--new-accent) !important; background: var(--new-pill-bg);
+      color: var(--rail-tone, var(--reply-muted)) !important;
+      background: color-mix(in srgb, var(--rail-tone, var(--reply-muted)) 10%, transparent);
     }
     .reply-branch-toggle {
       /* 零净高度：按钮坐在父回复底部与子树竖线的交点，不挤动头像。 */
@@ -719,7 +717,7 @@
     }
     .reply-children > .reply-wrapper::after { border-color: var(--rail-tone); }
     /* 导轨只由 wrapper 绘制；不在带未读边框的 cell 上重复画线。 */
-    .reply-branch-return > .cell .reply-parent-link { color: var(--rail-tone) !important; font-weight: 500; }
+    .reply-branch-return > .cell .reply-parent-link { font-weight: 500; }
     /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
        之前自己写死的 #f5f5f5 在白底上几乎看不见 */
     .reply-wrapper .cell {
