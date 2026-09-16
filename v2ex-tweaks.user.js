@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.17
+// @version      2.5.18
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -593,8 +593,7 @@
       --new-accent: #4a7af0;
       --reply-muted: #687480;
       --reply-surface: var(--box-background-color, #fff);
-      /* 未读药丸走"淡底 + 同色字"，不再是整块实心蓝：
-         一屏几十个实心色块会盖过正文，淡底同样能一眼扫出来。 */
+      /* 未读提示集中在楼层号：淡底、同色字和小圆点，左侧只保留回复关系。 */
       --new-pill-bg: rgba(74, 122, 240, 0.15);
       --new-pill-fg: #3f6cd8;
       --new-pill-bd: rgba(74, 122, 240, 0.30);
@@ -797,18 +796,14 @@
       color: var(--reply-muted) !important; border-color: rgba(0, 0, 0, 0.09);
     }
 
-    /* 未读行只留左边一条蓝竖条，不铺任何底色——扫读靠这条竖条，
-       楼层号那颗淡蓝药丸只作确认，两者一重一轻不会互相打架。
-       3px 边框 + 7px 内边距 = 普通行的 10px，正文左边缘不会跟着错开。
-       只有进场那一下闪一次（背景不带 !important，动画才压得住）。 */
-    .cell.reply-new {
-      border-left: 3px solid var(--new-accent) !important;
-      padding-left: 7px !important;
-      animation: new-reply-flash 0.6s ease-out;
-    }
-    @keyframes new-reply-flash {
-      0%   { background-color: rgba(74,122,240,0.18); }
-      100% { background-color: transparent; }
+    /* 未读状态不改变卡片边框或内边距，避免与分支导轨组成双线。
+       圆点附着于楼层号，不占布局宽度，也不会挤动感谢/回复按钮。 */
+    .reply-wrapper .fr .no { position: relative; }
+    .cell.reply-new .fr .no::after {
+      content: ''; position: absolute; top: -2px; right: -2px;
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--new-accent); box-shadow: 0 0 0 2px var(--reply-surface);
+      pointer-events: none;
     }
     /* 淡底 + 同色描边：在白底上比灰数字重、比实心蓝轻，正好落在"能扫到但不抢眼" */
     .cell.reply-new .fr .no,
@@ -1097,7 +1092,6 @@
       .reply-branch-toggle, .reply-branch-toggle svg, .reply-collapsed-hint {
         transition: none !important;
       }
-      .cell.reply-new { animation: none !important; }
     }
   `);
 
@@ -2189,7 +2183,7 @@
       for (const r of replies) {
         if (r.floorNum <= state.lastReadFloor) continue;
         newCount++;
-        // 未读状态全靠这个 class 驱动：行左边的蓝条 + 楼层号变成淡蓝药丸，
+        // 未读状态全靠这个 class 驱动：楼层号变成带圆点的淡蓝药丸，
         // 不再往头部塞任何额外节点（见 .cell.reply-new .fr .no）
         r.element.classList.add('reply-new');
         // 楼层号节点在解析阶段就拿到了，不必再 querySelector 一遍
