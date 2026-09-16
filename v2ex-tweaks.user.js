@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.13
+// @version      2.5.14
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -628,10 +628,15 @@
       --branch-ink: var(--line-hover);
     }
     .reply-parent-link {
-      flex: 0 1 auto; font-size: 11px; color: #77838f !important;
+      display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
+      flex: 0 0 auto; font-size: 11px; color: #77838f !important;
+      padding: 2px 4px; border-radius: 4px; line-height: 1.6;
       text-decoration: none; white-space: nowrap;
     }
-    .reply-parent-link:hover { color: var(--new-accent) !important; }
+    .reply-parent-link svg { width: 14px; height: 14px; flex: none; pointer-events: none; }
+    .reply-parent-link:hover, .reply-parent-link:focus-visible {
+      color: var(--new-accent) !important; background: var(--new-pill-bg);
+    }
     .reply-branch-toggle {
       /* 零净高度：按钮坐在父回复底部与子树竖线的交点，不挤动头像。 */
       position: relative; left: 0; z-index: 1;
@@ -2154,6 +2159,12 @@
       const iconTemplate = document.createElement('template');
       iconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-slot="icon">   <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg>';
 
+      // Static SVGs keep reply / fork markers consistent across fonts and platforms.
+      const parentIconTemplate = document.createElement('template');
+      parentIconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 3 2.5 6.5 6 10M3 6.5h6a4 4 0 0 1 4 4V13"/></svg>';
+      const forkIconTemplate = document.createElement('template');
+      forkIconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="4" cy="3" r="1.5"/><circle cx="12" cy="3" r="1.5"/><circle cx="8" cy="13" r="1.5"/><path d="M4 4.5V6a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V4.5M8 8v3.5"/></svg>';
+
       let paletteCursor = 0;
       function appendNode(reply, parentEl, depth = 0, parentReply = null, siblingIndex = 0, siblingCount = 1) {
         const wrapper = document.createElement('div');
@@ -2187,8 +2198,12 @@
           const link = document.createElement('a');
           link.className = 'reply-parent-link';
           link.href = `#${parentReply.element.id}`;
-          link.textContent = `${siblingIndex > 0 ? '另一个分支 · ' : ''}回复 #${parentReply.floorNum}`;
-          link.title = `回复 ${parentReply.memberName} 的 #${parentReply.floorNum} 楼 · 第 ${depth} 层对话`;
+          link.appendChild((siblingIndex > 0 ? forkIconTemplate : parentIconTemplate).content.cloneNode(true));
+          const floor = document.createElement('span');
+          floor.textContent = `#${parentReply.floorNum}`;
+          link.appendChild(floor);
+          link.title = `${siblingIndex > 0 ? '另一个分支 · ' : ''}回复 ${parentReply.memberName} 的 #${parentReply.floorNum} 楼 · 第 ${depth} 层对话`;
+          link.setAttribute('aria-label', link.title);
           const head = reply.element.querySelector('.v2-reply-head');
           if (head) head.insertBefore(link, head.querySelector('.rh-gap'));
           else reply.element.querySelector('.reply_content')?.before(link);
