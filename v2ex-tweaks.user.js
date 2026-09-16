@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.19
+// @version      2.5.20
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -593,10 +593,9 @@
       --new-accent: #4a7af0;
       --reply-muted: #687480;
       --reply-surface: var(--box-background-color, #fff);
-      /* 未读提示集中在楼层号：淡底、同色字和小圆点，左侧只保留回复关系。 */
+      /* 未读提示集中在楼层数字；淡蓝背景仅用于控件交互反馈。 */
       --new-pill-bg: rgba(74, 122, 240, 0.15);
       --new-pill-fg: #3f6cd8;
-      --new-pill-bd: rgba(74, 122, 240, 0.30);
     }
 
     .box { padding-bottom: 0 !important; }
@@ -775,7 +774,7 @@
        悬停才出现——鼠标一进一出，NEW 左右横跳，不悬停时又像悬在空处。
        现在直接把状态画进楼层号本身：它是 .fr 的最后一个元素、右边缘就是
        行的右边缘，按钮显不显示都影响不到它，天然对齐成一列。
-       已读 = 安静的灰数字；未读 = 同样尺寸的淡蓝药丸。
+       已读 = 安静的灰数字；未读 = 同样尺寸的蓝色数字。
        两种状态只换颜色、不换几何：宽高/内边距/字号全一致，
        否则同一列里未读那几个会明显胖出来。 */
     .reply-wrapper .fr .no {
@@ -794,21 +793,12 @@
       color: var(--reply-muted) !important; border-color: rgba(0, 0, 0, 0.09);
     }
 
-    /* 未读状态不改变卡片边框或内边距，避免与分支导轨组成双线。
-       圆点附着于楼层号，不占布局宽度，也不会挤动感谢/回复按钮。 */
-    .reply-wrapper .fr .no { position: relative; }
-    .cell.reply-new .fr .no::after {
-      content: ''; position: absolute; top: -2px; right: -2px;
-      width: 5px; height: 5px; border-radius: 50%;
-      background: var(--new-accent); box-shadow: 0 0 0 2px var(--reply-surface);
-      pointer-events: none;
-    }
-    /* 淡底 + 同色描边：在白底上比灰数字重、比实心蓝轻，正好落在"能扫到但不抢眼" */
+    /* 未读只高亮楼层数字，不加底色、边框或圆点。 */
     .cell.reply-new .fr .no,
     .cell.reply-new:hover .fr .no {
       color: var(--new-pill-fg) !important;
-      background: var(--new-pill-bg) !important;
-      border-color: var(--new-pill-bd);
+      background: transparent !important;
+      border-color: transparent !important;
     }
 
     #v2ex-new-count-bar {
@@ -1046,7 +1036,6 @@
       --reply-surface: var(--box-background-color, #23252b);
       --new-pill-bg: rgba(111, 151, 255, 0.18);
       --new-pill-fg: #9fb8ff;
-      --new-pill-bd: rgba(111, 151, 255, 0.32);
     }
     #Wrapper.Night .reply-wrapper .cell { border-bottom-color: #303239 !important; }
     #Wrapper.Night .reply-wrapper .fr .no { color: var(--reply-muted) !important; }
@@ -1054,12 +1043,12 @@
       color: #9aa1ab !important; border-color: rgba(255, 255, 255, 0.13);
     }
     /* 夜间的已读/悬停规则带 #Wrapper 前缀，特异性高过通用的未读规则，
-       这里必须同样带前缀重写一次，否则未读药丸会被刷回灰数字 */
+       这里必须同样带前缀重写一次，否则未读高亮会被刷回灰数字 */
     #Wrapper.Night .cell.reply-new .fr .no,
     #Wrapper.Night .cell.reply-new:hover .fr .no {
       color: var(--new-pill-fg) !important;
-      background: var(--new-pill-bg) !important;
-      border-color: var(--new-pill-bd);
+      background: transparent !important;
+      border-color: transparent !important;
     }
     #Wrapper.Night .reply-collapsed-hint { color: var(--reply-muted); }
     #Wrapper.Night #v2ex-new-count-bar {
@@ -2181,7 +2170,7 @@
       for (const r of replies) {
         if (r.floorNum <= state.lastReadFloor) continue;
         newCount++;
-        // 未读状态全靠这个 class 驱动：楼层号变成带圆点的淡蓝药丸，
+        // 未读状态全靠这个 class 驱动：楼层数字变为蓝色，
         // 不再往头部塞任何额外节点（见 .cell.reply-new .fr .no）
         r.element.classList.add('reply-new');
         // 楼层号节点在解析阶段就拿到了，不必再 querySelector 一遍
