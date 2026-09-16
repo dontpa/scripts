@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.15
+// @version      2.5.16
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -620,9 +620,9 @@
       border-left: 1px solid var(--branch-ink); border-bottom: 1px solid var(--branch-ink);
       border-bottom-left-radius: 7px;
     }
-    /* 封顶后的虚线是继续对话的提示，不伪装成同级的实线分叉。 */
-    .reply-children-flat > .reply-wrapper::before { border-left-style: dashed; }
-    .reply-children-flat > .reply-wrapper::after { border-left-style: dashed; }
+    /* 缩进封顶后用楼层链接表达关系，避免各层导轨在同一横坐标重叠。 */
+    .reply-children-flat > .reply-wrapper::before,
+    .reply-children-flat > .reply-wrapper::after { display: none; }
     .reply-wrapper:has(> .reply-branch-toggle:hover) > .reply-children > .reply-wrapper,
     .reply-wrapper:has(> .reply-branch-toggle:focus-visible) > .reply-children > .reply-wrapper {
       --branch-ink: var(--line-hover);
@@ -698,16 +698,7 @@
       --reply-tone-2: #906c95; --reply-tone-3: #a37845;
     }
     .reply-children > .reply-wrapper::after { border-color: var(--rail-tone); }
-    .reply-children-flat > .reply-rail-continuation::after { display: none; }
-    .reply-children-flat > .reply-rail-continuation::before {
-      height: auto; bottom: 0; border-left-style: solid;
-    }
-    .reply-children-flat > .reply-rail-fork::after { display: block; border-left-style: solid; width: 18px; }
-    .reply-children > .reply-wrapper > .cell::before {
-      content: ''; position: absolute; left: -16px; top: 0; bottom: 0;
-      border-left: 2px solid var(--rail-tone); opacity: .55; pointer-events: none;
-    }
-    .reply-branch-return > .cell { border-top: 1px solid var(--line-color); padding-top: 18px !important; }
+    /* 导轨只由 wrapper 绘制；不在带未读边框的 cell 上重复画线。 */
     .reply-branch-return > .cell .reply-parent-link { color: var(--rail-tone) !important; font-weight: 500; }
     .reply-rail-continuation > .reply-branch-toggle { opacity: .35; }
     .reply-rail-continuation > .reply-branch-toggle:hover,
@@ -2032,7 +2023,7 @@
       forkIconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="4" cy="3" r="1.5"/><circle cx="12" cy="3" r="1.5"/><circle cx="8" cy="13" r="1.5"/><path d="M4 4.5V6a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V4.5M8 8v3.5"/></svg>';
 
       let paletteCursor = 0;
-      function appendNode(reply, parentEl, depth = 0, parentReply = null, siblingIndex = 0, siblingCount = 1) {
+      function appendNode(reply, parentEl, depth = 0, parentReply = null, siblingIndex = 0) {
         const wrapper = document.createElement('div');
         wrapper.className = 'reply-wrapper' + (depth >= 2 ? ' reply-branch-flat' : '');
         wrapper.dataset.depth = String(depth);
@@ -2046,7 +2037,6 @@
         wrapper._v2Tone = tone;
         wrapper.style.setProperty('--rail-tone', `var(--reply-tone-${tone})`);
         if (depth > 2) wrapper.classList.add('reply-rail-continuation');
-        if (parentReply && siblingCount > 1) wrapper.classList.add('reply-rail-fork');
         if (parentReply && siblingIndex > 0) wrapper.classList.add('reply-branch-return');
         reply.element.classList.remove('inner');
         // 头部重排纯属美化，任何意外都不该连累整棵树
@@ -2128,13 +2118,13 @@
       }
 
       try {
-        const stack = roots.map((reply, i) => ({ reply, parentEl: fragment, depth: 0, parent: null, siblingIndex: i, siblingCount: roots.length })).reverse();
+        const stack = roots.map((reply, i) => ({ reply, parentEl: fragment, depth: 0, parent: null, siblingIndex: i })).reverse();
         while (stack.length) {
-          const { reply, parentEl, depth, parent, siblingIndex, siblingCount } = stack.pop();
-          const wrapper = appendNode(reply, parentEl, depth, parent, siblingIndex, siblingCount);
+          const { reply, parentEl, depth, parent, siblingIndex } = stack.pop();
+          const wrapper = appendNode(reply, parentEl, depth, parent, siblingIndex);
           const childrenEl = wrapper._v2Children;
           for (let i = reply.children.length - 1; i >= 0; i--) {
-            stack.push({ reply: reply.children[i], parentEl: childrenEl, depth: depth + 1, parent: reply, siblingIndex: i, siblingCount: reply.children.length });
+            stack.push({ reply: reply.children[i], parentEl: childrenEl, depth: depth + 1, parent: reply, siblingIndex: i });
           }
         }
       } catch (err) {
