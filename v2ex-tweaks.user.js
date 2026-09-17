@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.20
+// @version      2.5.21
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -1373,7 +1373,14 @@
       const lockKey = `${storeKey}_lock`;
       const lock = GM.get(lockKey, null);
       // 跨标签页互斥：5 分钟内已有实例在跑就让路（也兼容进程被杀导致的锁残留）
-      if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) return 'locked';
+      if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) {
+        // 页面跳转可能中断旧实例，finally 来不及清锁。不能只跳过一次，
+        // 否则当前页面会一直等到再次切换标签或第二天才尝试签到。
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(run, Math.min(5 * 60 * 1000, lock.startedAt + 5 * 60 * 1000 - Date.now()) + 100);
+        log('签到：另一页面正在处理，锁到期后自动复查');
+        return 'locked';
+      }
 
       const token = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
       GM.set(lockKey, { date: today, startedAt: Date.now(), token });
