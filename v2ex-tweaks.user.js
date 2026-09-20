@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.6.0
-// @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；固定宽度回复关系图 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.21
+// @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -600,43 +600,81 @@
 
     .box { padding-bottom: 0 !important; }
 
-    /* Body width never depends on depth; only unfinished forks occupy lanes. */
-    .reply-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); position: relative; }
-    .reply-row[hidden], .reply-row [hidden] { display: none !important; }
-    .reply-row > .cell { min-width: 0; position: relative; }
-    .reply-graph { position: relative; color: var(--reply-muted); }
-    .reply-graph-line { position: absolute; top: 0; bottom: 0; width: 1px; background: currentColor; opacity: .55; }
-    .reply-graph-outgoing { top: 30px; }
-    .reply-graph-compressed { background: transparent; border-left: 1px dashed currentColor; width: 0; }
-    .reply-graph-incoming { position: absolute; inset: 0 0 auto; width: 100%; height: 30px; overflow: visible; opacity: .55; }
-    .reply-graph-incoming path { fill: none; stroke: currentColor; stroke-width: 1; vector-effect: non-scaling-stroke; }
-    .reply-graph .is-path { color: var(--new-accent); opacity: 1; }
-    .reply-graph-node { position: absolute; top: 30px; transform: translate(-50%, -50%); z-index: 1; }
-    span.reply-graph-node { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    /* 导轨位于子树缩进区，原始回复单元不为控件预留空列。 */
+    /* 主干继承父分支色，首条回复沿用此色；新的分叉只在弯线处换色。 */
+    .reply-children { margin-left: 32px; padding-left: 0; --branch-ink: var(--rail-tone, var(--line-color)); }
+    .reply-children.reply-children-flat { margin-left: 0; }
+    .reply-wrapper { position: relative; }
+    .reply-wrapper > .cell { position: relative; }
+    .reply-children > .reply-wrapper::before,
+    .reply-children > .reply-wrapper::after {
+      content: ''; position: absolute; pointer-events: none; box-sizing: border-box;
+    }
+    /* 同级回复共用竖线；末项在圆弧起点收住，不能穿过圆弧形成多余的尾巴。 */
+    .reply-children > .reply-wrapper::before {
+      left: -16px; top: 0; bottom: 0;
+      border-left: 1px solid var(--branch-ink);
+    }
+    .reply-children > .reply-wrapper:last-child::before { bottom: auto; height: 22px; }
+    .reply-children > .reply-wrapper::after {
+      left: -16px; top: 22px; width: 20px; height: 8px;
+      border-left: 1px solid var(--branch-ink); border-bottom: 1px solid var(--branch-ink);
+      border-bottom-left-radius: 7px;
+    }
+    /* 缩进封顶后用楼层链接表达关系，避免各层导轨在同一横坐标重叠。 */
+    .reply-children-flat > .reply-wrapper::before,
+    .reply-children-flat > .reply-wrapper::after { display: none; }
+    .reply-parent-link {
+      display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
+      flex: 0 0 auto; font-size: 12px; color: var(--rail-tone, var(--reply-muted)) !important;
+      padding: 2px 4px; border-radius: 4px; line-height: 1.6;
+      text-decoration: none; white-space: nowrap;
+      font-variant-numeric: tabular-nums; touch-action: manipulation;
+      transition: color 150ms ease, background-color 150ms ease;
+    }
+    .reply-parent-link svg { width: 14px; height: 14px; flex: none; pointer-events: none; }
+    .reply-parent-link:hover, .reply-parent-link:focus-visible {
+      color: var(--rail-tone, var(--reply-muted)) !important;
+      background: color-mix(in srgb, var(--rail-tone, var(--reply-muted)) 10%, transparent);
+    }
     .reply-branch-toggle {
-      display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
-      border: 0; background: transparent; color: inherit; cursor: pointer;
-      font: 16px/1 system-ui; touch-action: manipulation;
+      /* 零净高度：按钮坐在父回复底部与子树竖线的交点，不挤动头像。 */
+      position: relative; left: 0; z-index: 1;
+      display: grid; place-items: center; width: 32px; height: 28px;
+      margin: -14px 0; border: 0; border-radius: 50%; padding: 0;
+      color: var(--reply-muted); background: var(--reply-surface); cursor: pointer;
+      touch-action: manipulation;
+      transition: color 0.15s, background-color 0.15s;
     }
-    .reply-branch-toggle::before { content: ''; position: absolute; width: 15px; height: 15px; border: 1px solid currentColor; border-radius: 50%; background: var(--reply-surface); z-index: -1; }
-    .reply-branch-toggle:hover { color: var(--new-accent); }
-    .reply-parent-link, .reply-overflow {
-      display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
-      font: inherit; font-size: 12px; line-height: 1.6; padding: 2px 4px; border: 0; border-radius: 4px;
-      background: transparent; color: var(--reply-muted) !important; text-decoration: none;
-      white-space: nowrap; cursor: pointer; touch-action: manipulation;
+    .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -32px; }
+    .reply-branch-toggle svg { width: 16px; height: 16px; pointer-events: none; transition: transform 150ms ease; }
+    .reply-branch-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
+    .reply-branch-toggle:hover, .reply-branch-toggle:focus-visible {
+      color: var(--new-accent); background: var(--new-pill-bg);
     }
-    .reply-parent-link svg { width: 14px; height: 14px; flex: none; }
-    .reply-parent-link:hover, .reply-overflow:hover { background: var(--bg-hover); color: var(--new-accent) !important; }
     .reply-branch-toggle:focus-visible, .reply-collapsed-hint:focus-visible,
-    .reply-parent-link:focus-visible, .reply-overflow:focus-visible, .reply-ancestors a:focus-visible {
-      outline: 2px solid var(--new-accent); outline-offset: 2px; border-radius: 4px;
+    .reply-parent-link:focus-visible { outline: 2px solid var(--new-accent); outline-offset: 2px; }
+    .reply-children.is-collapsed { display: none; }
+    .reply-collapsed-hint {
+      display: none; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
+      padding: 12px 12px 12px 42px; border: 0; background: transparent;
+      color: var(--reply-muted); font: inherit; font-size: 12px;
+      line-height: 1.6; touch-action: manipulation; border-radius: 4px;
+      transition: color 150ms ease, background-color 150ms ease;
+      text-align: left; cursor: pointer;
     }
-    .reply-collapsed-hint { display: block; padding: 8px 0 0; border: 0; background: transparent; color: var(--reply-muted); font: inherit; font-size: 12px; cursor: pointer; }
-    .reply-collapsed-hint:hover { color: var(--new-accent); }
-    .reply-ancestors { display: flex; flex-wrap: wrap; gap: 6px; max-height: 160px; overflow: auto; padding: 12px 0; font-size: 12px; }
-    .reply-ancestors a { color: var(--reply-muted); }
-    .reply-ancestors a:not(:last-child)::after { content: ' ›'; }
+    .reply-collapsed-hint:hover, .reply-collapsed-hint:focus-visible {
+      color: var(--new-accent); background: var(--bg-hover);
+    }
+    .reply-parent-link:active, .reply-branch-toggle:active, .reply-collapsed-hint:active {
+      background: var(--new-pill-bg);
+    }
+    .reply-children.is-collapsed + .reply-collapsed-hint { display: flex; }
+    .reply-preview-avatars { display: inline-flex; padding-right: 4px; }
+    .reply-preview-avatars img {
+      width: 20px; height: 20px; object-fit: cover; border-radius: 4px;
+      margin-right: -4px;
+    }
     .reply-wrapper > .cell > table { table-layout: fixed; }
     .reply-wrapper .reply_content { overflow-wrap: anywhere; }
     .reply-wrapper .reply_content pre { max-width: 100%; overflow-x: auto; }
@@ -650,7 +688,9 @@
       color: var(--reply-muted); font-size: 12px !important; line-height: 1.5;
     }
     @media (max-width: 600px) {
-      .reply-row { grid-template-columns: 36px minmax(0, 1fr); }
+      .reply-children { margin-left: 28px; }
+      .reply-branch-toggle { width: 24px; left: 0; }
+      .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -28px; }
       .reply-wrapper .v2-reply-head { gap: 4px 8px; }
       .reply-wrapper .v2-reply-head .rh-gap { display: none; }
       .reply-wrapper .v2-reply-head > .fr { order: 2; margin-left: auto !important; }
@@ -659,11 +699,24 @@
       .reply-wrapper > .cell > table > tbody > tr > td:first-child { width: 32px; }
     }
     @media (pointer: coarse) {
-      .reply-branch-toggle { width: 44px; height: 44px; }
-      .reply-parent-link, .reply-overflow { min-height: 44px; box-sizing: border-box; }
+      .reply-branch-toggle { width: 44px; height: 44px; margin-block: -22px; left: -6px; }
+      .reply-wrapper.reply-branch-flat > .reply-branch-toggle { left: -38px; }
+      .reply-parent-link { min-width: 44px; min-height: 44px; box-sizing: border-box; justify-content: center; }
       .reply-collapsed-hint { min-height: 44px; }
     }
 
+    @media (pointer: coarse) and (max-width: 600px) {
+      .reply-branch-toggle { left: -10px; }
+    }
+
+    /* 分支色只用于局部区分；深度不继续占用正文宽度，也不常驻数字。 */
+    :root {
+      --reply-tone-0: #466b8f; --reply-tone-1: #347468;
+      --reply-tone-2: #825886; --reply-tone-3: #92622e;
+    }
+    .reply-children > .reply-wrapper::after { border-color: var(--rail-tone); }
+    /* 导轨只由 wrapper 绘制；不在带未读边框的 cell 上重复画线。 */
+    .reply-branch-return > .cell .reply-parent-link { font-weight: 500; }
     /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
        之前自己写死的 #f5f5f5 在白底上几乎看不见 */
     .reply-wrapper .cell {
@@ -973,6 +1026,8 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
+      --reply-tone-0: #8daed0; --reply-tone-1: #74b4a0;
+      --reply-tone-2: #bc91bf; --reply-tone-3: #c8a16f;
       --line-color: #50555e;
       --line-hover: #6c8fe8;
       --bg-hover: #2a2d34;
@@ -1811,34 +1866,34 @@
       catch (err) { log('Collapse state error:', err); }
     }
 
-    function syncGraphVisibility(state) {
-      let hiddenThrough = -1;
-      for (const model of state.rows) {
-        model.row.hidden = model.index <= hiddenThrough;
-        const collapsed = state.collapsedSet.has(model.reply.id);
-        if (!model.row.hidden && collapsed) hiddenThrough = model.end;
-        if (model.toggle) {
-          const label = collapsed ? `展开 ${model.count} 条回复` : '收起此分支';
-          model.toggle.setAttribute('aria-expanded', String(!collapsed));
-          model.toggle.setAttribute('aria-label', label);
-          model.toggle.title = label;
-          model.toggle.textContent = collapsed ? '+' : '−';
-          model.hint.hidden = !collapsed;
-          model.outgoing.hidden = collapsed;
-        }
-      }
+    function syncBranchToggle(childrenEl) {
+      const toggle = childrenEl._v2Toggle;
+      if (!toggle) return;
+      const expanded = !childrenEl.classList.contains('is-collapsed');
+      const label = expanded ? '收起此分支' : `展开 ${childrenEl.dataset.replyCount} 条回复`;
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.setAttribute('aria-label', label);
+      toggle.title = label;
     }
 
-    // Flat rows keep ancestry in the presentation model, not in DOM nesting.
+    // j/k 或锚点跳转可能落在被折叠的子树里，滚动过去会看到"空白"。
+    // 先展开沿途所有折叠祖先，并同步持久化状态。
     function revealAncestors(el) {
-      const row = el?.closest('.reply-row');
-      const state = row?.parentElement?._v2CollapseState;
-      if (!state) return;
-      for (let parent = row._v2Model.parent; parent; parent = parent.parent) {
-        state.collapsedSet.delete(parent.reply.id);
+      if (!el) return;
+      const collapsed = [];
+      for (let node = el.parentElement; node; node = node.parentElement) {
+        if (node.classList?.contains('reply-children') && node.classList.contains('is-collapsed')) {
+          collapsed.push(node);
+        }
       }
-      syncGraphVisibility(state);
-      saveCollapsedSet(state.topicId, state.collapsedSet);
+      if (!collapsed.length) return;
+      const state = collapsed[collapsed.length - 1].closest('.box')?._v2CollapseState;
+      for (const node of collapsed) {
+        node.classList.remove('is-collapsed');
+        syncBranchToggle(node);
+        state?.collapsedSet.delete(node.dataset.replyId);
+      }
+      if (state) saveCollapsedSet(state.topicId, state.collapsedSet);
     }
 
     // ── 头部重排 ──
@@ -1925,147 +1980,179 @@
       return { roots, counts };
     }
 
-    // A lane is reserved only while an ancestor still has unvisited siblings.
-    // Single-child chains reuse their lane. Keep at most three visible fork owners;
-    // deeper relations are explicitly compressed into the fourth lane.
+    // ── 渲染树 ──
     function renderTree(flatReplies, maps, container, topicId) {
       const { roots, counts } = buildReplyForest(flatReplies, maps);
-      const state = { topicId, collapsedSet: getCollapsedSet(topicId), rows: [] };
-      const fragment = document.createDocumentFragment();
-      const x = lane => 12 + Math.min(lane, 3) * 10;
-      const make = (tag, cls) => {
-        const el = document.createElement(tag); el.className = cls; return el;
-      };
-      const line = (graph, lane, cls) => {
-        const el = make('span', `reply-graph-line ${cls}`);
-        el.style.left = `${x(lane) / 52 * 100}%`; graph.append(el); return el;
-      };
-      const stack = roots.slice().reverse().map(reply => ({ reply, parent: null, lane: 0, forks: [], depth: 0, sibling: 0 }));
-      try {
-        while (stack.length) {
-          const model = stack.pop(), { reply, parent, lane } = model;
-          model.index = state.rows.length;
-          model.count = counts.get(reply);
-          model.end = model.index + model.count;
-          const row = model.row = make('div', 'reply-wrapper reply-row');
-          row.dataset.replyId = reply.id; row.dataset.depth = model.depth; row.dataset.lane = lane;
-          row._v2Model = model;
-          const graph = make('div', 'reply-graph');
-          const node = model.node = make(reply.children.length ? 'button' : 'span', 'reply-graph-node');
-          node.style.left = `${x(lane) / 52 * 100}%`;
-          if (reply.children.length) {
-            node.type = 'button'; node.classList.add('reply-branch-toggle'); model.toggle = node;
-            model.outgoing = line(graph, lane, 'reply-graph-outgoing');
-          } else node.setAttribute('aria-hidden', 'true');
-          if (lane > 3) line(graph, 3, 'reply-graph-compressed').setAttribute('aria-hidden', 'true');
-          model.rails = model.forks.map(fork => ({ ...fork, el: line(graph, fork.lane, 'reply-graph-through') }));
-          if (parent) {
-            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-            svg.setAttribute('viewBox', '0 0 52 30'); svg.setAttribute('preserveAspectRatio', 'none');
-            svg.setAttribute('aria-hidden', 'true'); svg.classList.add('reply-graph-incoming');
-            const path = document.createElementNS(svg.namespaceURI, 'path');
-            const from = x(parent.lane), to = x(lane);
-            path.setAttribute('d', from === to ? `M${to} 0V30` : `M${from} 0V18Q${from} 30 ${to} 30`);
-            svg.append(path); graph.append(svg); model.incoming = svg;
+
+      const collapsedSet = getCollapsedSet(topicId);
+      const fragment     = document.createDocumentFragment();
+
+      container._v2CollapseState = { topicId, collapsedSet };
+      if (!container._v2CollapseBound) {
+        container._v2CollapseBound = true;
+        container.addEventListener('click', e => {
+          const state = container._v2CollapseState;
+          if (!state) return;
+
+          const parentLink = e.target.closest?.('.reply-parent-link');
+          if (parentLink && container.contains(parentLink)) {
+            const target = document.getElementById(parentLink.hash.slice(1));
+            if (target) revealAncestors(target);
+            return;
           }
-          graph.append(node);
-          reply.element.classList.remove('inner');
-          reply.element.querySelectorAll('.reply-context,.reply-parent-link,.reply-branch-toggle,.reply-collapsed-hint,.reply-overflow,.reply-ancestors').forEach(el => el.remove());
-          try { layoutReplyHeader(reply.element); } catch (err) { log('楼层头部重排失败：', err); }
+          const toggle = e.target.closest?.('.reply-branch-toggle');
+          const clickedHint = e.target.closest?.('.reply-collapsed-hint');
+          let childrenEl = null;
+          let hint = null;
+
+          if (toggle && container.contains(toggle)) {
+            childrenEl = document.getElementById(toggle.getAttribute('aria-controls'));
+            hint = childrenEl?.nextElementSibling;
+          } else if (clickedHint && container.contains(clickedHint)) {
+            hint = clickedHint;
+            childrenEl = hint.previousElementSibling;
+          } else return;
+
+          if (!childrenEl?.classList.contains('reply-children') || !hint?.classList.contains('reply-collapsed-hint')) return;
+          e.preventDefault();
+          e.stopPropagation();
+
+          const replyId = childrenEl.dataset.replyId;
+          const nowCollapsed = childrenEl.classList.toggle('is-collapsed');
+          syncBranchToggle(childrenEl);
+          if (!nowCollapsed && clickedHint === document.activeElement) {
+            childrenEl._v2Toggle?.focus({ preventScroll: true });
+          }
+          if (nowCollapsed) state.collapsedSet.add(replyId);
+          else state.collapsedSet.delete(replyId);
+          saveCollapsedSet(state.topicId, state.collapsedSet);
+
+        });
+      }
+
+      const iconTemplate = document.createElement('template');
+      iconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-slot="icon">   <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg>';
+
+      // Static SVGs keep reply / fork markers consistent across fonts and platforms.
+      const parentIconTemplate = document.createElement('template');
+      parentIconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 3 2.5 6.5 6 10M3 6.5h6a4 4 0 0 1 4 4V13"/></svg>';
+      const forkIconTemplate = document.createElement('template');
+      forkIconTemplate.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="4" cy="3" r="1.5"/><circle cx="12" cy="3" r="1.5"/><circle cx="8" cy="13" r="1.5"/><path d="M4 4.5V6a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V4.5M8 8v3.5"/></svg>';
+
+      let paletteCursor = 0;
+      function appendNode(reply, parentEl, depth = 0, parentReply = null, siblingIndex = 0) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'reply-wrapper' + (depth >= 2 ? ' reply-branch-flat' : '');
+        wrapper.dataset.depth = String(depth);
+        wrapper.dataset.replyId = reply.id;
+        const parentWrapper = parentEl._v2Wrapper || null;
+        let tone = parentWrapper ? parentWrapper._v2Tone : 0;
+        if (siblingIndex > 0) {
+          tone = (++paletteCursor) % 4;
+          if (parentWrapper && tone === parentWrapper._v2Tone) tone = (++paletteCursor) % 4;
+        }
+        wrapper._v2Tone = tone;
+        wrapper.style.setProperty('--rail-tone', `var(--reply-tone-${tone})`);
+        if (depth > 2) wrapper.classList.add('reply-rail-continuation');
+        if (parentReply && siblingIndex > 0) wrapper.classList.add('reply-branch-return');
+        reply.element.classList.remove('inner');
+        // 头部重排纯属美化，任何意外都不该连累整棵树
+        try { layoutReplyHeader(reply.element); }
+        catch (err) { log('楼层头部重排失败：', err); }
+        wrapper.appendChild(reply.element);
+        reply.element.querySelector('.reply-context')?.remove();
+        reply.element.querySelector('.reply-parent-link')?.remove();
+        reply.element.querySelector('.reply-branch-toggle')?.remove();
+        if (parentReply) {
+          const link = document.createElement('a');
+          link.className = 'reply-parent-link';
+          link.href = `#${parentReply.element.id}`;
+          link.appendChild((siblingIndex > 0 ? forkIconTemplate : parentIconTemplate).content.cloneNode(true));
+          const floor = document.createElement('span');
+          floor.textContent = `#${parentReply.floorNum}`;
+          link.appendChild(floor);
+          link.title = `${siblingIndex > 0 ? '另一个分支 · ' : ''}回复 ${parentReply.memberName} 的 #${parentReply.floorNum} 楼 · 第 ${depth} 层对话`;
+          link.setAttribute('aria-label', link.title);
           const head = reply.element.querySelector('.v2-reply-head');
-          const addMeta = el => head ? head.insertBefore(el, head.querySelector('.rh-gap')) : reply.element.querySelector('.reply_content')?.before(el);
-          if (parent) {
-            const link = make('a', 'reply-parent-link');
-            link.href = `#${parent.reply.element.id}`;
-            link.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3 2.5 6.5 6 10M3 6.5h6a4 4 0 0 1 4 4V13"/></svg>';
-            link.append(document.createTextNode(`#${parent.reply.floorNum}`));
-            link.title = `回复 ${parent.reply.memberName} 的 #${parent.reply.floorNum} 楼`;
-            link.setAttribute('aria-label', link.title); addMeta(link);
+          if (head) head.insertBefore(link, head.querySelector('.rh-gap'));
+          else reply.element.querySelector('.reply_content')?.before(link);
+        }
+
+        if (reply.children.length > 0) {
+          const count = counts.get(reply);
+          const childrenEl = document.createElement('div');
+          childrenEl.className = 'reply-children collapsible' + (depth >= 2 ? ' reply-children-flat' : '');
+          childrenEl.dataset.depth = String(depth + 1);
+          childrenEl.id = `v2-children-${reply.id}`;
+          childrenEl.dataset.replyId = reply.id;
+          childrenEl.dataset.replyCount = String(count);
+
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'reply-branch-toggle';
+          toggle.setAttribute('aria-controls', childrenEl.id);
+          toggle.setAttribute('aria-expanded', String(!collapsedSet.has(reply.id)));
+          // Heroicons mini chevron-down, MIT (Tailwind Labs). Static trusted icon.
+          toggle.appendChild(iconTemplate.content.cloneNode(true));
+          wrapper.appendChild(toggle);
+
+          const hint = document.createElement('button');
+          hint.type = 'button';
+          hint.className = 'reply-collapsed-hint';
+          hint.setAttribute('aria-controls', childrenEl.id);
+          const avatars = document.createElement('span');
+          avatars.className = 'reply-preview-avatars';
+          avatars.setAttribute('aria-hidden', 'true');
+          const names = new Set();
+          // A small representative sample; never copy arbitrary reply HTML.
+          for (const sample of [reply, ...reply.children]) {
+            if (!sample.memberAvatar || names.has(sample.memberName)) continue;
+            names.add(sample.memberName);
+            const avatar = document.createElement('img');
+            avatar.src = sample.memberAvatar;
+            avatar.alt = '';
+            avatar.loading = 'lazy';
+            avatars.appendChild(avatar);
+            if (names.size === 2) break;
           }
-          if (lane > 3) {
-            const overflow = make('button', 'reply-overflow'); overflow.type = 'button';
-            overflow.textContent = `⋮ +${lane - 3}`;
-            overflow.title = `已压缩 ${lane - 3} 条分支，查看完整回复关系`;
-            overflow.setAttribute('aria-label', overflow.title); overflow.setAttribute('aria-expanded', 'false');
-            addMeta(overflow);
-          }
-          if (model.toggle) {
-            model.hint = make('button', 'reply-collapsed-hint'); model.hint.type = 'button';
-            model.hint.textContent = `展开 ${model.count} 条回复`; reply.element.append(model.hint);
-          }
-          row.append(graph, reply.element); fragment.append(row); state.rows.push(model);
+          if (avatars.childElementCount) hint.appendChild(avatars);
+          const label = document.createElement('span');
+          label.textContent = `展开 ${count} 条回复`;
+          hint.appendChild(label);
+
+          // 恢复折叠状态
+          if (collapsedSet.has(reply.id)) childrenEl.classList.add('is-collapsed');
+
+          childrenEl._v2Wrapper = wrapper;
+          wrapper._v2Children = childrenEl;
+          childrenEl._v2Toggle = toggle;
+          wrapper.appendChild(childrenEl);
+          wrapper.appendChild(hint);
+          syncBranchToggle(childrenEl);
+        }
+        parentEl.appendChild(wrapper);
+        return wrapper;
+      }
+
+      try {
+        const stack = roots.map((reply, i) => ({ reply, parentEl: fragment, depth: 0, parent: null, siblingIndex: i })).reverse();
+        while (stack.length) {
+          const { reply, parentEl, depth, parent, siblingIndex } = stack.pop();
+          const wrapper = appendNode(reply, parentEl, depth, parent, siblingIndex);
+          const childrenEl = wrapper._v2Children;
           for (let i = reply.children.length - 1; i >= 0; i--) {
-            const forked = i < reply.children.length - 1;
-            const forks = forked && lane < 3 ? [...model.forks, { lane, owner: model, nextSibling: i + 1 }] : model.forks;
-            stack.push({ reply: reply.children[i], parent: model, lane: lane + (forked ? 1 : 0), forks, depth: model.depth + 1, sibling: i });
+            stack.push({ reply: reply.children[i], parentEl: childrenEl, depth: depth + 1, parent: reply, siblingIndex: i });
           }
         }
-        syncGraphVisibility(state);
       } catch (err) {
+        // 兜底：宁可平铺显示，也不能因为建树失败把回复弄丢
+        // （楼层此时已被搬进 fragment，直接放弃会导致整页回复消失）
         log('构建楼层树失败，退回平铺显示：', err);
-        fragment.replaceChildren(...flatReplies.map(reply => reply.element)); state.rows = [];
+        fragment.replaceChildren();
+        for (const reply of flatReplies) fragment.appendChild(reply.element);
       }
-      container.replaceChildren(fragment); container._v2CollapseState = state;
-      if (!container._v2GraphBound) {
-        container._v2GraphBound = true;
-        let active = null;
-        const highlight = model => {
-          if (active === model) return; active = model;
-          const ancestry = new Set(), children = new Map();
-          for (let current = model; current; current = current.parent) {
-            ancestry.add(current);
-            if (current.parent) children.set(current.parent, current.sibling);
-          }
-          for (const item of container._v2CollapseState.rows) {
-            item.node.classList.toggle('is-path', ancestry.has(item));
-            item.incoming?.classList.toggle('is-path', ancestry.has(item));
-            item.outgoing?.classList.toggle('is-path', children.has(item));
-            for (const rail of item.rails) rail.el.classList.toggle('is-path', children.has(rail.owner) && children.get(rail.owner) >= rail.nextSibling);
-          }
-        };
-        const modelAt = target => target?.closest?.('.reply-row')?._v2Model;
-        container.addEventListener('pointerover', e => highlight(modelAt(e.target)));
-        container.addEventListener('pointerleave', () => highlight(modelAt(document.activeElement)));
-        container.addEventListener('focusin', e => highlight(modelAt(e.target)));
-        container.addEventListener('focusout', e => highlight(modelAt(e.relatedTarget)));
-        container.addEventListener('click', e => {
-          const model = modelAt(e.target); if (!model) return;
-          const currentState = container._v2CollapseState;
-          const link = e.target.closest('.reply-parent-link,.reply-ancestors a');
-          if (link) { revealAncestors(document.getElementById(link.hash.slice(1))); return; }
-          const toggle = e.target.closest('.reply-branch-toggle,.reply-collapsed-hint');
-          if (toggle) {
-            const set = currentState.collapsedSet, id = model.reply.id;
-            if (set.has(id)) set.delete(id); else set.add(id);
-            if (toggle === model.hint) model.toggle.focus({ preventScroll: true });
-            syncGraphVisibility(currentState); saveCollapsedSet(currentState.topicId, set); return;
-          }
-          const overflow = e.target.closest('.reply-overflow');
-          if (overflow) {
-            let panel = model.reply.element.querySelector('.reply-ancestors');
-            if (!panel) {
-              panel = make('nav', 'reply-ancestors'); panel.setAttribute('aria-label', '完整回复关系');
-              const ancestors = [];
-              for (let item = model.parent; item; item = item.parent) ancestors.push(item);
-              for (const item of ancestors.reverse()) {
-                const a = document.createElement('a'); a.href = `#${item.reply.element.id}`;
-                a.textContent = `${item.reply.memberName} #${item.reply.floorNum}`; panel.append(a);
-              }
-              model.reply.element.append(panel);
-            } else panel.hidden = !panel.hidden;
-            overflow.setAttribute('aria-expanded', String(!panel.hidden));
-          }
-        });
-        container.addEventListener('keydown', e => {
-          if (e.key !== 'Escape') return;
-          const model = modelAt(e.target), panel = model?.reply.element.querySelector('.reply-ancestors');
-          if (panel && !panel.hidden) {
-            panel.hidden = true;
-            const button = model.reply.element.querySelector('.reply-overflow');
-            button.setAttribute('aria-expanded', 'false'); button.focus();
-          }
-        });
-      }
+      container.innerHTML = '';
+      container.appendChild(fragment);
       document.dispatchEvent(new Event('v2ex:replies-updated'));
     }
 
@@ -2435,7 +2522,7 @@
 
       loadingBar.remove();
       log(`楼层树：${allReplies.length} 条回复 / 共 ${totalPages} 页（失败 ${failedPages.length} 页），`
-        + `分支 ${replyBox.querySelectorAll('.reply-branch-toggle').length} 组，未读 ${newCount} 条`);
+        + `嵌套 ${replyBox.querySelectorAll('.reply-children').length} 组，未读 ${newCount} 条`);
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
       updateNewCountBar(replyBox, newCount);
       commitReadState(readState, allReplies);
