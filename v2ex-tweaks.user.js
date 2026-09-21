@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.23
+// @version      2.5.24
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -1050,6 +1050,16 @@
     let retryTimer = 0;
     let networkFailures = 0;
 
+    function currentMember(doc = document) {
+      const href = doc.querySelector('#Top a[href^="/member/"]')?.getAttribute('href');
+      try { return href ? decodeURIComponent(new URL(href, location.origin).pathname.slice('/member/'.length)).toLowerCase() : ''; }
+      catch (_) { return ''; }
+    }
+
+    function verifyMember(doc, member) {
+      if (currentMember(doc) !== member) throw new Error('签到页面账号与当前标签页不一致，已停止领取');
+    }
+
     function isSafari() {
       // Safari 不允许扩展后台请求改写 Referer；V2EX 领取接口又会
       // 校验该字段，需要走真实的同源页面跳转。
@@ -1130,7 +1140,8 @@
     function requestText(url, referer) {
       const target = new URL(url, location.origin);
       if (target.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
-      return isSafari()
+      // Firefox Containers isolate page cookies; extension requests may use another jar.
+      return (isSafari() || /Firefox/i.test(navigator.userAgent))
         ? requestTextWithFetch(target, referer)
         : requestTextWithGM(target, referer);
     }
@@ -1192,7 +1203,7 @@
       return target;
     }
 
-    function claimWithDailyFrame(page) {
+    function claimWithDailyFrame(page, member) {
       const dailyUrl = new URL(page, location.origin);
       if (dailyUrl.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
 
@@ -1250,6 +1261,8 @@
             finish('signed-out');
             return;
           }
+          try { verifyMember(doc, member); }
+          catch (error) { finish(null, error); return; }
           if (REJECTED_RE.test(pageText(doc))) {
             finish(null, new Error('V2EX 拒绝了当前浏览器环境'));
             return;
@@ -1299,12 +1312,13 @@
       });
     }
 
-    async function verifyClaimed(page, retries, intervalMs) {
+    async function verifyClaimed(page, retries, intervalMs, member) {
       let lastStatus = 'unknown';
       for (let attempt = 0; attempt < retries; attempt++) {
         if (attempt > 0) await sleep(intervalMs);
         const result = await loadPage(page, location.href);
         if (isSignedOut(result.doc, result.finalUrl)) return { status: 'signed-out', result };
+        verifyMember(result.doc, member);
         if (REJECTED_RE.test(pageText(result.doc))) return { status: 'rejected', result };
         if (alreadyRedeemed(result.doc)) return { status: 'claimed', result };
         lastStatus = findRedeemUrl(result.doc) ? 'claimable' : 'unknown';
@@ -1314,9 +1328,13 @@
 
     async function execute() {
       const {
-        page, delayMinMs, delayMaxMs, storeKey,
+        page, delayMinMs, delayMaxMs,
         verifyRetries, verifyIntervalMs,
       } = CONFIG.daily;
+      const member = currentMember();
+      if (!member) return 'signed-out';
+      // Legacy global success/lock values cannot be attributed to any account.
+      const storeKey = `${CONFIG.daily.storeKey}:member:${encodeURIComponent(member)}`;
       const today = ymd();
       if (GM.get(storeKey, '') === today) return 'already-done';
       if (isSignedOut(document, location.href)) return 'signed-out';
@@ -1344,13 +1362,14 @@
         // Safari / wBlock Scripts 的后台请求与普通 fetch 都不能可靠地产生
         // V2EX 要求的任务页 Referer，因此改用隐藏的同源页面完成真实导航。
         if (isSafari()) {
-          const status = await claimWithDailyFrame(page);
+          const status = await claimWithDailyFrame(page, member);
           if (status === 'claimed' || status === 'already-claimed') GM.set(storeKey, today);
           return status;
         }
 
         const daily = await loadPage(page, location.href);
         if (isSignedOut(daily.doc, daily.finalUrl)) return 'signed-out';
+        verifyMember(daily.doc, member);
         if (REJECTED_RE.test(pageText(daily.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
 
         if (alreadyRedeemed(daily.doc)) {
@@ -1365,13 +1384,14 @@
         // 领取请求必须带上任务页作为 Referer
         const redeem = await loadPage(target.href, page);
         if (isSignedOut(redeem.doc, redeem.finalUrl)) throw new Error('登录状态已失效');
+        verifyMember(redeem.doc, member);
         if (REJECTED_RE.test(pageText(redeem.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
 
         // 领取后 V2EX 通常跳转到 /balance，页面本身不含"已领取"字样，
         // 因此需要回到任务页确认，而不是把跳转当作失败。
         let confirmed = alreadyRedeemed(redeem.doc);
         if (!confirmed) {
-          const verification = await verifyClaimed(page, verifyRetries, verifyIntervalMs);
+          const verification = await verifyClaimed(page, verifyRetries, verifyIntervalMs, member);
           if (verification.status === 'signed-out') throw new Error('登录状态已失效');
           if (verification.status === 'rejected') throw new Error('V2EX 拒绝了当前浏览器环境');
           confirmed = verification.status === 'claimed';
@@ -1418,7 +1438,7 @@
     }
 
     function boot() {
-      const tick = () => { if (GM.get(CONFIG.daily.storeKey, '') !== ymd()) run(); };
+      const tick = () => run();
       const start = () => setTimeout(tick, 800);
       if (document.readyState === 'complete') start();
       else window.addEventListener('load', start, { once: true });
