@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.22
+// @version      2.5.23
 // @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       you
 // @match        https://v2ex.com/*
@@ -593,6 +593,9 @@
       --new-accent: #4a7af0;
       --reply-muted: #687480;
       --reply-surface: var(--box-background-color, #fff);
+      --reply-toggle-ink: #8093a5;
+      --reply-toggle-bg: #f1f5f8;
+      --reply-toggle-hover: #e7eef4;
       /* 未读提示集中在楼层数字；淡蓝背景仅用于控件交互反馈。 */
       --new-pill-bg: rgba(74, 122, 240, 0.15);
       --new-pill-fg: #3f6cd8;
@@ -617,12 +620,20 @@
     .reply-parent-link:hover { color: var(--new-accent) !important; background: var(--bg-hover); }
     .reply-branch-toggle {
       position: absolute; z-index: 1; display: grid; place-items: center; width: 24px; height: 24px;
-      border: 0; border-radius: 4px; padding: 0; background: var(--reply-surface);
-      color: var(--reply-muted); font: 16px/1 system-ui; cursor: pointer; touch-action: manipulation;
+      border: 0; border-radius: 4px; padding: 0; background: transparent;
+      color: var(--reply-toggle-ink); font: 16px/1 system-ui; cursor: pointer; touch-action: manipulation;
     }
-    .reply-branch-toggle svg { width: 16px; height: 16px; pointer-events: none; }
+    /* Compact visible badge inside the unchanged 24px hit area. */
+    .reply-branch-toggle::before {
+      content: ''; position: absolute; width: 16px; height: 16px; border-radius: 4px;
+      background: var(--reply-toggle-bg);
+    }
+    .reply-branch-toggle svg { position: relative; width: 12px; height: 12px; stroke-width: 1.8; pointer-events: none; }
+    .reply-branch-toggle:hover::before {
+      background: var(--reply-toggle-hover);
+    }
     .reply-branch-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
-    .reply-branch-toggle:hover, .reply-collapsed-hint:hover { color: var(--new-accent); background: var(--bg-hover); }
+    .reply-collapsed-hint:hover { color: var(--new-accent); background: var(--bg-hover); }
     .reply-branch-toggle:focus-visible, .reply-collapsed-hint:focus-visible, .reply-parent-link:focus-visible {
       outline: 2px solid var(--new-accent); outline-offset: 2px;
     }
@@ -971,6 +982,9 @@
       --new-accent: #6f97ff;
       --reply-muted: #a4adb9;
       --reply-surface: var(--box-background-color, #23252b);
+      --reply-toggle-ink: #9aaebe;
+      --reply-toggle-bg: #303942;
+      --reply-toggle-hover: #394652;
       --new-pill-bg: rgba(111, 151, 255, 0.18);
       --new-pill-fg: #9fb8ff;
     }
@@ -1626,16 +1640,15 @@
     function extractFloorReferences(contentEl) {
       const floors = [];
 
-      function scan(node) {
-        if (node.nodeType === 3) {
+      const stack = [contentEl];
+      while (stack.length) {
+        const node = stack.pop();
+        if (node.nodeType === Node.TEXT_NODE) {
           for (const match of (node.nodeValue || '').matchAll(/#(\d+)/g)) floors.push(match[1]);
-          return;
+        } else if (node.nodeType === Node.ELEMENT_NODE && !FLOOR_REF_EXCLUDED_TAGS.has(node.tagName)) {
+          for (let child = node.lastChild; child; child = child.previousSibling) stack.push(child);
         }
-        if (node.nodeType !== 1 || FLOOR_REF_EXCLUDED_TAGS.has(node.tagName)) return;
-        for (const child of node.childNodes) scan(child);
       }
-
-      scan(contentEl);
       return floors;
     }
 
@@ -1826,9 +1839,11 @@
       const row = el?.closest('.reply-row');
       const state = row?._v2Model.state;
       if (!state) return;
+      let changed = false;
       for (let parent = row._v2Model.parent; parent; parent = parent.parent) {
-        state.collapsedSet.delete(parent.reply.id);
+        if (state.collapsedSet.delete(parent.reply.id)) changed = true;
       }
+      if (!changed) return;
       syncReplyVisibility(state);
       saveCollapsedSet(state.topicId, state.collapsedSet);
     }
@@ -1992,14 +2007,18 @@
         const visible = state.rows.filter(model => !model.row.hidden);
         const bounds = container.getBoundingClientRect();
         const positions = new Map();
-        // Batch layout reads before writing SVG paths.
+        const togglePositions = [];
+        // Complete all layout reads before writing button positions or SVG paths.
         for (const model of visible) {
           const avatar = model.reply.element.querySelector('.avatar');
           const rect = avatar?.getBoundingClientRect();
           if (model.toggle && rect?.width) {
             const cellRect = model.reply.element.getBoundingClientRect();
-            model.toggle.style.left = `${rect.right - cellRect.left - 16}px`;
-            model.toggle.style.top = `${rect.bottom - cellRect.top - 16}px`;
+            togglePositions.push({
+              toggle: model.toggle,
+              left: `${rect.right - cellRect.left - 16}px`,
+              top: `${rect.bottom - cellRect.top - 16}px`,
+            });
           }
           if (rect?.width && rect.height) positions.set(model, {
             x: rect.left + rect.width / 2 - bounds.left,
@@ -2007,7 +2026,11 @@
             bottom: rect.bottom - bounds.top + 3
           });
         }
-        const paths = document.createDocumentFragment();
+        for (const { toggle, left, top } of togglePositions) {
+          if (toggle.style.left !== left) toggle.style.left = left;
+          if (toggle.style.top !== top) toggle.style.top = top;
+        }
+        const pathData = [];
         for (const model of visible) {
           const parent = model.parent;
           if (!parent || model.depth > state.maxDepth) continue;
@@ -2016,8 +2039,16 @@
           // Stop at the avatar edge. Small indents naturally use a smaller elbow.
           const target = end.left - 2, radius = Math.min(8, Math.max(0, target - start.x));
           if (target < start.x || end.y <= start.bottom) continue;
+          pathData.push(`M${start.x} ${start.bottom}V${end.y - radius}Q${start.x} ${end.y} ${start.x + radius} ${end.y}H${target}`);
+        }
+        // Unchanged geometry must not rebuild SVG or wake incremental scanners.
+        const signature = pathData.join('\n');
+        if (state.pathSignature === signature) return;
+        state.pathSignature = signature;
+        const paths = document.createDocumentFragment();
+        for (const data of pathData) {
           const path = document.createElementNS(svg.namespaceURI, 'path');
-          path.setAttribute('d', `M${start.x} ${start.bottom}V${end.y - radius}Q${start.x} ${end.y} ${start.x + radius} ${end.y}H${target}`);
+          path.setAttribute('d', data);
           paths.append(path);
         }
         svg.replaceChildren(paths);
@@ -2031,9 +2062,11 @@
         container._v2AvatarTreeBound = true;
         let highlightedParent = null;
         const highlightParent = target => {
-          highlightedParent?.classList.remove('reply-parent-highlight');
           const link = target?.closest?.('.reply-parent-link');
-          highlightedParent = link?._v2RefReply?.element || null;
+          const nextParent = link?._v2RefReply?.element || null;
+          if (highlightedParent === nextParent) return;
+          highlightedParent?.classList.remove('reply-parent-highlight');
+          highlightedParent = nextParent;
           highlightedParent?.classList.add('reply-parent-highlight');
         };
         container.addEventListener('mouseover', e => highlightParent(e.target));
@@ -2150,6 +2183,21 @@
 
       function showCard(refReply, anchorEl) {
         clearTimeout(hideTimer);
+        // Adjacent, fully visible replies already provide the reference context.
+        // Use visible DOM order rather than floor numbers (DFS can reorder them).
+        const currentRow = anchorEl.closest('.reply-row');
+        const targetRow = refReply.element.closest('.reply-row');
+        let previousRow = currentRow?.previousElementSibling;
+        while (previousRow?.hidden) previousRow = previousRow.previousElementSibling;
+        const contentRect = refReply.element.querySelector('.reply_content')?.getBoundingClientRect();
+        const targetRect = refReply.element.getBoundingClientRect();
+        if (targetRow && previousRow === targetRow && !targetRow.hidden &&
+            contentRect?.width > 0 && contentRect.height > 0 &&
+            targetRect.top >= 0 && contentRect.bottom <= window.innerHeight &&
+            contentRect.left >= 0 && contentRect.right <= window.innerWidth) {
+          card?.classList.remove('visible');
+          return;
+        }
         const c = getCard();
         const header = document.createElement('div');
         header.className = 'rp-header';
