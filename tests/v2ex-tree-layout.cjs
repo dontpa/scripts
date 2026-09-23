@@ -10,7 +10,7 @@ const { chromium } = require('playwright');
  const module = source.slice(source.indexOf('  const ThreadTree = (() => {'), source.indexOf('  // 6) 功能D'));
  await page.route('**/*', r => r.fulfill({body:'<html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>',contentType:'text/html'}));
  await page.goto('https://edge.v2ex.com/t/1');
- await page.addStyleTag({content:'.cell{padding:10px;border-bottom:1px solid #ccc}.fr{float:right}.avatar{width:48px;height:48px}body{font:14px -apple-system,sans-serif}td{vertical-align:top}a{color:#66727d;text-decoration:none}.ago{margin-left:8px}' + css + '\nbody{margin:0} #test{width:min(800px,100%);margin:auto}'});
+ await page.addStyleTag({content:'.cell{padding:10px;border-bottom:1px solid #ccc}.fr{float:right}.no{display:inline-block;padding:1px 3px;border-radius:3px;color:#89919c;background:#f2f3f5;font-size:12px;font-weight:400}#Wrapper.Night .no{color:#abb1ba;background:#353941}.avatar{width:48px;height:48px}body{font:14px -apple-system,sans-serif}td{vertical-align:top}a{color:#66727d;text-decoration:none}.ago{margin-left:8px}' + css + '\nbody{margin:0} #test{width:min(800px,100%);margin:auto}'});
  await page.evaluate(module.replace('return { boot, revealAncestors };','return { renderTree, parseReplyCell, buildLookupMaps, revealAncestors, initHoverPreview, extractFloorReferences };') + '\nwindow.tree=ThreadTree;', );
  await page.evaluate(() => {
  window.CONFIG={threadTree:{collapseKeyPrefix:'test-collapse-'}}; window.log=console.log;
@@ -213,5 +213,55 @@ const { chromium } = require('playwright');
  }
  console.log('PASS parent hover/focus preview, sibling isolation and dynamic connector measurement');
  console.log('PASS capped depth, no reset separators, shallow avatar connectors');
+ await page.evaluate(() => {
+  const box = document.getElementById('test');
+  const wrapper = document.createElement('div'); wrapper.id = 'Wrapper';
+  box.before(wrapper); wrapper.append(box);
+  const native = document.createElement('div');
+  native.innerHTML = '<div class="fr"><span class="no">8</span></div>';
+  native.id = 'native-floor-reference';
+  wrapper.append(native);
+  document.getElementById('r_7').classList.add('reply-new');
+ });
+ for (const night of [false, true]) {
+  await page.locator('#Wrapper').evaluate((el, enabled) => el.classList.toggle('Night', enabled), night);
+  const result = await page.evaluate(() => {
+   const unreadCell = document.getElementById('r_7');
+   const unread = unreadCell.querySelector('.no');
+   const snapshot = el => {
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return {
+     display: style.display, fontSize: style.fontSize, fontWeight: style.fontWeight,
+     lineHeight: style.lineHeight, padding: style.padding, border: style.border,
+     borderWidth: style.borderWidth, borderStyle: style.borderStyle,
+     borderRadius: style.borderRadius, color: style.color,
+     background: style.backgroundColor, width: rect.width, height: rect.height,
+    };
+   };
+   unreadCell.classList.remove('reply-new');
+   const before = snapshot(unread);
+   unreadCell.classList.add('reply-new');
+   return {
+    native: snapshot(document.querySelector('#native-floor-reference .no')),
+    ordinary: snapshot(document.querySelector('#r_8 .no')),
+    before, after: snapshot(unread),
+   };
+  });
+  const { display: ordinaryDisplay, ...ordinaryAppearance } = result.ordinary;
+  const { display: nativeDisplay, ...nativeAppearance } = result.native;
+  assert.deepEqual(ordinaryAppearance, nativeAppearance, 'ordinary floor must keep native site styling');
+  assert.notEqual(result.after.background, result.before.background);
+  assert.notEqual(result.after.color, result.before.color);
+  for (const key of ['display', 'fontSize', 'fontWeight', 'lineHeight', 'padding', 'borderWidth', 'borderStyle', 'width', 'height']) {
+   assert.equal(result.after[key], result.before[key], `unread floor must preserve native ${key}`);
+  }
+  await page.locator('#r_8').hover();
+  const hovered = await page.locator('#r_8 .no').evaluate(el => ({ color: getComputedStyle(el).color, background: getComputedStyle(el).backgroundColor }));
+  assert.deepEqual(hovered, { color: result.native.color, background: result.native.background });
+  await page.locator('#r_7').scrollIntoViewIfNeeded();
+  await page.screenshot({ animations: 'disabled', path: `/tmp/v2ex-unread-${night ? 'night' : 'light'}.png` });
+ }
+ console.log('PASS native ordinary floor styling and layout-neutral unread highlight in light/night themes');
  await browser.close();process.exitCode=failed?1:0;
 })();
