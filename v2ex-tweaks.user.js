@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.25
-// @description  V2EX 日常增强：用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.26
+// @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -13,6 +13,9 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        GM.registerMenuCommand
 // @grant        GM_notification
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -70,6 +73,16 @@
     },
     nav: {
       scrollOffsetRatio: 0.22,
+    },
+    links: {
+      // 未设置过时沿用 V2EX 和浏览器原有的链接行为。
+      openTopicsAndMembersInNewTab: false,
+      storeKey: 'v2ex_open_topics_members_new_tab',
+    },
+    imgur: {
+      // 保持已有代理行为；用户可从脚本管理器菜单关闭。
+      proxyEnabled: true,
+      storeKey: 'v2ex_imgur_proxy_enabled',
     },
     threadTree: {
       collapseKeyPrefix: 'v2_collapse_',
@@ -186,6 +199,33 @@
       window.addEventListener('storage', e => { if (e.key === key) handler(undefined); });
     },
   };
+
+  // 每个独立功能占一项脚本管理器菜单。支持注销的管理器会即时更新状态文案。
+  function createToggleMenu(label, isEnabled, toggle) {
+    let menuId = null;
+    return function refreshMenu() {
+      const register = typeof GM_registerMenuCommand === 'function'
+        ? GM_registerMenuCommand
+        : globalThis.GM?.registerMenuCommand?.bind(globalThis.GM);
+      if (!register) return;
+      const unregister = typeof GM_unregisterMenuCommand === 'function'
+        ? GM_unregisterMenuCommand
+        : globalThis.GM?.unregisterMenuCommand?.bind(globalThis.GM);
+      if (menuId !== null) {
+        if (!unregister) return; // 不支持注销时保留固定文案，切换后用通知反馈。
+        try { unregister(menuId); } catch (err) { log('更新脚本菜单失败：', err); return; }
+      }
+      const caption = unregister
+        ? `${label}：${isEnabled() ? '已开启（点击关闭）' : '已关闭（点击开启）'}`
+        : `切换${label}`;
+      try {
+        menuId = register(caption, () => {
+          if (!toggle()) return;
+          if (!unregister) notify('V2EX 浏览偏好', `${label}${isEnabled() ? '已开启' : '已关闭'}`);
+        }) ?? caption;
+      } catch (err) { log('注册脚本菜单失败：', err); }
+    };
+  }
 
   // #rrggbb → [r, g, b]，解析不出来时返回 null 交给调用方决定退路
   function parseHex(hex) {
@@ -2917,6 +2957,16 @@
   // 8) 功能F：Imgur 图片代理
   // =========================
   const ImgurProxy = (() => {
+    const { storeKey, proxyEnabled } = CONFIG.imgur;
+    const originalImages = new WeakMap();
+    const proxiedImages = new Set();
+    const originalLinks = new WeakMap();
+    const proxiedLinks = new Set();
+    let enabled = proxyEnabled;
+    let observer = null;
+    const isEnabled = () => enabled;
+    const refreshMenu = createToggleMenu('Imgur 图片代理', isEnabled, () => setEnabled(!enabled));
+
     function parseImgurUrl(value) {
       if (!value) return null;
       try {
@@ -2934,43 +2984,112 @@
       return url.hostname.toLowerCase() === 'i.imgur.com' || /\.(?:avif|gif|jpe?g|png|webp)$/i.test(url.pathname);
     }
 
+    function processLink(link) {
+      if (link?.tagName !== 'A') return;
+      const previous = originalLinks.get(link);
+      if (previous?.proxy === link.getAttribute('href')) return;
+      if (previous) { originalLinks.delete(link); proxiedLinks.delete(link); }
+      const href = link.getAttribute('href');
+      const url = parseImgurUrl(href);
+      if (!url || !isDirectImage(url)) return;
+      const proxy = proxyUrl(url);
+      originalLinks.set(link, { href, proxy });
+      proxiedLinks.add(link);
+      link.setAttribute('href', proxy);
+    }
+
     function processImage(img) {
-      if (img.dataset.proxied === '1') return;
+      if (!enabled) return;
       const src = img.getAttribute('src');
+      const previous = originalImages.get(img);
+      if (previous?.proxy === src) return;
+      if (previous) {
+        originalImages.delete(img);
+        proxiedImages.delete(img);
+        delete img.dataset.proxied;
+      }
       const imgurUrl = parseImgurUrl(src);
       if (!imgurUrl) return;
+      const proxy = proxyUrl(imgurUrl);
+      originalImages.set(img, { src, proxy });
+      proxiedImages.add(img);
       img.dataset.proxied = '1';
-      img.setAttribute('src', proxyUrl(imgurUrl));
-      const parent = img.parentElement;
-      if (parent?.tagName?.toLowerCase() === 'a') {
-        const href = parseImgurUrl(parent.getAttribute('href'));
-        if (href && isDirectImage(href)) parent.setAttribute('href', proxyUrl(href));
+      img.setAttribute('src', proxy);
+      processLink(img.parentElement);
+    }
+
+    function restoreAll() {
+      for (const img of proxiedImages) {
+        const original = originalImages.get(img);
+        if (original && img.getAttribute('src') === original.proxy) img.setAttribute('src', original.src);
+        originalImages.delete(img);
+        delete img.dataset.proxied;
+      }
+      proxiedImages.clear();
+      for (const link of proxiedLinks) {
+        const original = originalLinks.get(link);
+        if (original && link.getAttribute('href') === original.proxy) link.setAttribute('href', original.href);
+        originalLinks.delete(link);
+      }
+      proxiedLinks.clear();
+    }
+
+    function applyEnabled(next) {
+      if (enabled === next) return;
+      enabled = next;
+      if (!isTopicPage()) return;
+      if (enabled) {
+        scanAll();
+        startObserving();
+      } else {
+        observer?.disconnect();
+        observer = null;
+        restoreAll();
       }
     }
 
+    function setEnabled(value) {
+      const next = Boolean(value);
+      if (!GM.set(storeKey, next)) return false;
+      applyEnabled(next);
+      refreshMenu();
+      return true;
+    }
+
     function processNode(node) {
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (!enabled || node.nodeType !== Node.ELEMENT_NODE) return;
       if (node.matches('img')) processImage(node);
       node.querySelectorAll('img').forEach(processImage);
     }
 
     function scanAll() { document.querySelectorAll('img[src*="imgur.com"]').forEach(processImage); }
-    function boot() {
-      scanAll();
-      // Imgur 图只出现在话题/回复正文里：初始 scanAll 保持全页兜底，
-      // 增量观察则收窄到 #Main，避免头部/头像 src 抖动触发无谓回调。
+    function startObserving() {
+      if (observer) return;
+      // Imgur 图只出现在话题/回复正文里：初始扫描保持全页兜底，
+      // 增量观察则收窄到 #Main，关闭代理时完全停止观察。
       const root = document.querySelector('#Main') || document.body;
       const enqueueImages = createSubtreeBatch(processNode, 0);
-      new MutationObserver(mutations => {
+      observer = new MutationObserver(mutations => {
         for (const mutation of mutations) {
           if (mutation.type === 'attributes') enqueueImages(mutation.target);
           else for (const node of mutation.addedNodes) {
             if (node.nodeType === Node.ELEMENT_NODE) enqueueImages(node);
           }
         }
-      }).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+      });
+      observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
     }
-    return { boot };
+    function boot() {
+      enabled = GM.get(storeKey, proxyEnabled) !== false;
+      GM.onChange(storeKey, next => {
+        applyEnabled((next === undefined ? GM.get(storeKey, proxyEnabled) : next) !== false);
+        refreshMenu();
+      });
+      refreshMenu();
+      if (!isTopicPage()) return;
+      if (enabled) { scanAll(); startObserving(); }
+    }
+    return { boot, isEnabled, setEnabled };
   })();
 
   // =========================
@@ -3495,6 +3614,13 @@
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    function exportTags() {
+      const payload = exportPayload();
+      if (!payload.count) { toast('还没有标签可导出'); return; }
+      download(`v2ex-user-tags-${ymd()}.json`, JSON.stringify(payload, null, 2));
+      toast(`已导出 ${payload.count} 个用户、${payload.tagCount} 个标签`);
     }
 
     // ── Toast ──
@@ -4077,12 +4203,7 @@
         exportBtn.type = 'button';
         exportBtn.className = 'v2t-btn';
         exportBtn.textContent = '导出';
-        exportBtn.addEventListener('click', () => {
-          const payload = exportPayload();
-          if (!payload.count) { toast('还没有标签可导出'); return; }
-          download(`v2ex-user-tags-${ymd()}.json`, JSON.stringify(payload, null, 2));
-          toast(`已导出 ${payload.count} 个用户、${payload.tagCount} 个标签`);
-        });
+        exportBtn.addEventListener('click', exportTags);
         const importBtn = document.createElement('button');
         importBtn.type = 'button';
         importBtn.className = 'v2t-btn';
@@ -4150,6 +4271,11 @@
         searchEl.focus();
       }
 
+      function importTags() {
+        open();
+        pickFile();
+      }
+
       function close() {
         if (!overlay) return;
         Editor.close();
@@ -4168,7 +4294,7 @@
         if (isOpen()) { renderList(); renderMerge(); }
       }
 
-      return { open, close, refresh, isOpen };
+      return { open, close, refresh, isOpen, importTags };
     })();
 
     // ── 装载 ──
@@ -4212,6 +4338,15 @@
     function boot() {
       decorate(document);
       mountSettingsEntry();
+      const register = typeof GM_registerMenuCommand === 'function'
+        ? GM_registerMenuCommand
+        : globalThis.GM?.registerMenuCommand?.bind(globalThis.GM);
+      if (register) {
+        try {
+          register('导入用户标签…', () => Manager.importTags());
+          register('导出用户标签', exportTags);
+        } catch (err) { log('注册标签菜单失败：', err); }
+      }
       document.addEventListener('click', event => {
         if (!event.target.closest?.('.v2t-color-picker, .v2t-color-orbit')) closeColorPickers();
       });
@@ -4271,15 +4406,86 @@
   })();
 
   // =========================
-  // 10) 启动
+  // 10) 可选在新标签页打开帖子和用户主页
+  // =========================
+  const NewTabLinks = (() => {
+    const V2EX_HOSTS = new Set(['v2ex.com', 'www.v2ex.com', 'edge.v2ex.com']);
+    const TOPIC_PATH = /^\/t\/\d+(?:\/|$)/;
+    const MEMBER_PATH = /^\/member\/[^/]+\/?$/;
+    const { storeKey, openTopicsAndMembersInNewTab } = CONFIG.links;
+    let enabled = openTopicsAndMembersInNewTab;
+
+    function isEnabled() { return enabled; }
+    const refreshMenu = createToggleMenu('帖子和用户主页新标签页', isEnabled, () => setEnabled(!enabled));
+
+    function setEnabled(value) {
+      const next = Boolean(value);
+      if (!GM.set(storeKey, next)) return false;
+      enabled = next;
+      refreshMenu();
+      return true;
+    }
+
+    function isEligible(anchor) {
+      if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return false;
+      const href = anchor.getAttribute('href');
+      if (!href || href.startsWith('#')) return false;
+      let url;
+      try { url = new URL(href, location.href); } catch (_) { return false; }
+      if (!V2EX_HOSTS.has(url.hostname) || !['http:', 'https:'].includes(url.protocol)) return false;
+      if (!TOPIC_PATH.test(url.pathname) && !MEMBER_PATH.test(url.pathname)) return false;
+      // 楼层定位、当前主题翻页等仍在当前标签页完成（含切换 V2EX 域名的同一主题链接）。
+      const linkedTopic = url.pathname.match(/^\/t\/(\d+)/)?.[1];
+      const currentTopic = location.pathname.match(/^\/t\/(\d+)/)?.[1];
+      if (linkedTopic && linkedTopic === currentTopic) return false;
+      if (url.origin === location.origin && url.pathname === location.pathname && url.search === location.search) return false;
+      return true;
+    }
+
+    function boot() {
+      enabled = GM.get(storeKey, openTopicsAndMembersInNewTab) !== false;
+      GM.onChange(storeKey, next => {
+        enabled = (next === undefined ? GM.get(storeKey, openTopicsAndMembersInNewTab) : next) !== false;
+        refreshMenu();
+      });
+      refreshMenu();
+      // 在默认导航发生前设置 target，保留浏览器原生的新标签页和容器行为。
+      // 委托监听也覆盖树形回复和无限加载后才出现的链接。
+      document.addEventListener('click', event => {
+        if (!enabled || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const anchor = event.target.closest?.('a[href]');
+        if (!isEligible(anchor)) return;
+        const originalTarget = anchor.getAttribute('target');
+        const originalRel = anchor.getAttribute('rel');
+        const hadNoopener = anchor.relList.contains('noopener');
+        anchor.target = '_blank';
+        anchor.relList.add('noopener');
+        // 默认导航已开始后还原属性，否则关闭开关后点过的链接仍会留在新标签页。
+        setTimeout(() => {
+          if (anchor.getAttribute('target') === '_blank') {
+            if (originalTarget === null) anchor.removeAttribute('target');
+            else anchor.setAttribute('target', originalTarget);
+          }
+          if (!hadNoopener) anchor.relList.remove('noopener');
+          if (originalRel === null && !anchor.getAttribute('rel')) anchor.removeAttribute('rel');
+        }, 0);
+      }, true);
+    }
+
+    return { boot, isEnabled, setEnabled };
+  })();
+
+  // =========================
+  // 11) 启动
   // =========================
   Daily.boot();
+  NewTabLinks.boot();
+  ImgurProxy.boot();
   UserTags.boot();
   if (isTopicPage()) {
     ThreadTree.boot();
     B64.boot();
     HotRoom.boot();
     NavKeys.boot();
-    ImgurProxy.boot();
   }
 })();

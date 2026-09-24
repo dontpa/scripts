@@ -71,6 +71,11 @@ const {chromium}=require('playwright');
    assert.equal(await page.locator('#incremental .v2-b64-wrap').count(),1);
    console.log('PASS B64 moved scanned container with newly appended nested text');
    const img=src.slice(src.indexOf('  const ImgurProxy ='),src.indexOf('  // 9) 功能G'));
+   await page.evaluate(()=>{
+    CONFIG.imgur={proxyEnabled:true,storeKey:'test-imgur'};
+    window.GM={get:(_key,fallback)=>fallback,set:()=>true,onChange:()=>{}};
+    window.createToggleMenu=()=>()=>{};
+   });
    await page.evaluate(img+'\nImgurProxy.boot();');
    await page.evaluate(()=>{const root=document.createElement('div');document.body.append(root);const image=document.createElement('img');root.append(image);image.src='https://i.imgur.com/example.png';image.id='proxy-test';});
    await page.waitForTimeout(50);
