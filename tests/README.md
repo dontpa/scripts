@@ -22,7 +22,8 @@ node tests/v2ex-performance.cjs
   and member links, the persistent userscript-manager menu switch, and preserved
   floor/external-link behavior.
 - `v2ex-imgur-toggle.cjs`: independent Imgur proxy menu setting, existing-image
-  restoration, reapplication, and dynamically inserted images.
+  restoration, reapplication, dynamically inserted images, and stable ordering
+  of all userscript menu entries on managers without in-place updates.
 - `v2ex-tag-menu.cjs`: userscript-manager tag export and import, including the
   existing merge preview and confirmation before stored tags change.
 - `v2ex-performance.cjs`: repeat rendering of 400 replies, a 20,000-level forest,

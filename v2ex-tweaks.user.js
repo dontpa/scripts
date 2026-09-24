@@ -200,30 +200,57 @@
     },
   };
 
-  // 每个独立功能占一项脚本管理器菜单。支持注销的管理器会即时更新状态文案。
+  // 原位更新菜单文案，避免注销后重注册把开关挪到菜单末尾。
+  // 旧管理器若不支持同 ID 更新，就按首次注册顺序重建所有本脚本菜单。
+  const ScriptMenu = (() => {
+    const entries = [];
+    const register = typeof GM_registerMenuCommand === 'function'
+      ? GM_registerMenuCommand
+      : globalThis.GM?.registerMenuCommand?.bind(globalThis.GM);
+    const unregister = typeof GM_unregisterMenuCommand === 'function'
+      ? GM_unregisterMenuCommand
+      : globalThis.GM?.unregisterMenuCommand?.bind(globalThis.GM);
+
+    function registerEntry(entry) {
+      const caption = unregister ? entry.caption() : entry.fallback;
+      entry.id = register(caption, entry.callback) ?? caption;
+      entry.currentCaption = caption;
+    }
+
+    function add(caption, callback, fallback = caption) {
+      if (!register) return () => {};
+      const entry = { caption: typeof caption === 'function' ? caption : () => caption, callback, fallback, id: null };
+      entries.push(entry);
+      try { registerEntry(entry); } catch (err) { log('注册脚本菜单失败：', err); }
+      return () => {
+        if (!unregister || entry.id === null || entry.currentCaption === entry.caption()) return;
+        try {
+          const nextCaption = entry.caption();
+          const updatedId = register(nextCaption, entry.callback, { id: entry.id }) ?? nextCaption;
+          if (updatedId === entry.id) { entry.currentCaption = nextCaption; return; }
+          // 不支持原位更新：移除新产生的项，再按固定顺序重新注册全部菜单。
+          unregister(updatedId);
+          for (const item of entries) if (item.id !== null) unregister(item.id);
+          for (const item of entries) registerEntry(item);
+        } catch (err) { log('更新脚本菜单失败：', err); }
+      };
+    }
+
+    return { add, canRefresh: () => !!unregister };
+  })();
+
   function createToggleMenu(label, isEnabled, toggle) {
-    let menuId = null;
+    let refresh = null;
     return function refreshMenu() {
-      const register = typeof GM_registerMenuCommand === 'function'
-        ? GM_registerMenuCommand
-        : globalThis.GM?.registerMenuCommand?.bind(globalThis.GM);
-      if (!register) return;
-      const unregister = typeof GM_unregisterMenuCommand === 'function'
-        ? GM_unregisterMenuCommand
-        : globalThis.GM?.unregisterMenuCommand?.bind(globalThis.GM);
-      if (menuId !== null) {
-        if (!unregister) return; // 不支持注销时保留固定文案，切换后用通知反馈。
-        try { unregister(menuId); } catch (err) { log('更新脚本菜单失败：', err); return; }
-      }
-      const caption = unregister
-        ? `${label}：${isEnabled() ? '已开启（点击关闭）' : '已关闭（点击开启）'}`
-        : `切换${label}`;
-      try {
-        menuId = register(caption, () => {
+      if (refresh) { refresh(); return; }
+      refresh = ScriptMenu.add(
+        () => `${label}：${isEnabled() ? '已开启（点击关闭）' : '已关闭（点击开启）'}`,
+        () => {
           if (!toggle()) return;
-          if (!unregister) notify('V2EX 浏览偏好', `${label}${isEnabled() ? '已开启' : '已关闭'}`);
-        }) ?? caption;
-      } catch (err) { log('注册脚本菜单失败：', err); }
+          if (!ScriptMenu.canRefresh()) notify('V2EX 浏览偏好', `${label}${isEnabled() ? '已开启' : '已关闭'}`);
+        },
+        `切换${label}`,
+      );
     };
   }
 
@@ -4338,15 +4365,8 @@
     function boot() {
       decorate(document);
       mountSettingsEntry();
-      const register = typeof GM_registerMenuCommand === 'function'
-        ? GM_registerMenuCommand
-        : globalThis.GM?.registerMenuCommand?.bind(globalThis.GM);
-      if (register) {
-        try {
-          register('导入用户标签…', () => Manager.importTags());
-          register('导出用户标签', exportTags);
-        } catch (err) { log('注册标签菜单失败：', err); }
-      }
+      ScriptMenu.add('导入用户标签…', () => Manager.importTags());
+      ScriptMenu.add('导出用户标签', exportTags);
       document.addEventListener('click', event => {
         if (!event.target.closest?.('.v2t-color-picker, .v2t-color-orbit')) closeColorPickers();
       });
