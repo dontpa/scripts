@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.26
+// @version      2.5.31
 // @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
@@ -40,18 +40,12 @@
   const CONFIG = {
     daily: {
       page: '/mission/daily',
-      delayMinMs: 1500,
-      delayMaxMs: 3800,
       requestTimeoutMs: 12000,
       verifyRetries: 3,
       verifyIntervalMs: 900,
-      // 网络类错误的自动补签：失败后延迟重试，避免一次抖动就漏签
-      networkRetries: 3,
-      networkRetryDelayMs: 5 * 60 * 1000,
       // V2EX 的每日奖励按服务器所在时区（UTC+8）跨天，不能用 UTC 日期判断
       timeZone: 'Asia/Shanghai',
       storeKey: 'v2ex_daily_check_ymd_v4',
-      notify: true,
     },
     tags: {
       storeKey: 'v2ex_user_tags_v2',
@@ -1087,6 +1081,21 @@
     let inFlight = null;
     let retryTimer = 0;
     let networkFailures = 0;
+    // Only a server confirmation in this document may skip another check.
+    const confirmedDays = new Set();
+    function markConfirmed(key, day, member) {
+      confirmedDays.add(`${key}:${day}`);
+      GM.set(key, day);
+      if (currentMember() === member) {
+        for (const link of document.querySelectorAll?.('a[href="/mission/daily"]') || []) {
+          link.textContent = '今日登录奖励已领取';
+        }
+      }
+    }
+    function retryAfter(ms) {
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(run, ms);
+    }
 
     function currentMember(doc = document) {
       const href = doc.querySelector('#Top a[href^="/member/"]')?.getAttribute('href');
@@ -1130,58 +1139,11 @@
       }
     }
 
-    function requestTextWithGM(target, referer) {
-      const legacyRequest = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null;
-      const modernRequest = typeof globalThis.GM?.xmlHttpRequest === 'function'
-        ? globalThis.GM.xmlHttpRequest.bind(globalThis.GM)
-        : null;
-      const send = legacyRequest || modernRequest;
-      if (!send) return requestTextWithFetch(target, referer);
-
-      const headers = { Accept: 'text/html,application/xhtml+xml' };
-      if (referer) headers.Referer = new URL(referer, location.origin).href;
-
-      return new Promise((resolve, reject) => {
-        const fail = message => reject(new RetryableError(`${message}：${target.pathname}`));
-        try {
-          const request = send({
-            method: 'GET',
-            url: target.href,
-            responseType: 'text',
-            timeout: CONFIG.daily.requestTimeoutMs,
-            headers,
-            onload: response => {
-              if (response.status < 200 || response.status >= 400) {
-                reject(new RetryableError(`HTTP ${response.status} for ${target.pathname}`));
-                return;
-              }
-              resolve({
-                text: typeof response.responseText === 'string'
-                  ? response.responseText
-                  : (typeof response.response === 'string' ? response.response : ''),
-                finalUrl: response.finalUrl || response.responseURL || target.href,
-              });
-            },
-            ontimeout: () => fail('请求超时'),
-            onerror: () => fail('请求失败'),
-            onabort: () => fail('请求已取消'),
-          });
-          // Safari Userscripts 的现代 API 同时返回 Promise；防止它只 reject
-          // 而没有触发 onerror 时留下未处理的 Promise rejection。
-          request?.catch?.(() => fail('请求失败'));
-        } catch (_) {
-          fail('请求失败');
-        }
-      });
-    }
-
     function requestText(url, referer) {
       const target = new URL(url, location.origin);
       if (target.origin !== location.origin) return Promise.reject(new Error('拒绝跨站签到请求'));
-      // Firefox Containers isolate page cookies; extension requests may use another jar.
-      return (isSafari() || /Firefox/i.test(navigator.userAgent))
-        ? requestTextWithFetch(target, referer)
-        : requestTextWithGM(target, referer);
+      // Keep every request in this page's cookie jar, including Firefox Containers.
+      return requestTextWithFetch(target, referer);
     }
     function parseHtml(html) { return new DOMParser().parseFromString(html, 'text/html'); }
 
@@ -1366,7 +1328,7 @@
 
     async function execute() {
       const {
-        page, delayMinMs, delayMaxMs,
+        page,
         verifyRetries, verifyIntervalMs,
       } = CONFIG.daily;
       const member = currentMember();
@@ -1374,102 +1336,77 @@
       // Legacy global success/lock values cannot be attributed to any account.
       const storeKey = `${CONFIG.daily.storeKey}:member:${encodeURIComponent(member)}`;
       const today = ymd();
-      if (GM.get(storeKey, '') === today) return 'already-done';
+      if (confirmedDays.has(`${storeKey}:${today}`)) return 'already-done';
       if (isSignedOut(document, location.href)) return 'signed-out';
 
-      const lockKey = `${storeKey}_lock`;
-      const lock = GM.get(lockKey, null);
-      // 跨标签页互斥：5 分钟内已有实例在跑就让路（也兼容进程被杀导致的锁残留）
-      if (lock?.date === today && Date.now() - lock.startedAt < 5 * 60 * 1000) {
-        // 页面跳转可能中断旧实例，finally 来不及清锁。不能只跳过一次，
-        // 否则当前页面会一直等到再次切换标签或第二天才尝试签到。
-        clearTimeout(retryTimer);
-        retryTimer = setTimeout(run, Math.min(5 * 60 * 1000, lock.startedAt + 5 * 60 * 1000 - Date.now()) + 100);
-        log('签到：另一页面正在处理，锁到期后自动复查');
-        return 'locked';
+      // Safari / wBlock Scripts 的后台请求与普通 fetch 都不能可靠地产生
+      // V2EX 要求的任务页 Referer，因此改用隐藏的同源页面完成真实导航。
+      if (isSafari()) {
+        const status = await claimWithDailyFrame(page, member);
+        if (status === 'claimed' || status === 'already-claimed') markConfirmed(storeKey, today, member);
+        return status;
       }
 
-      const token = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      GM.set(lockKey, { date: today, startedAt: Date.now(), token });
+      const daily = await loadPage(page, location.href);
+      if (isSignedOut(daily.doc, daily.finalUrl)) return 'signed-out';
+      verifyMember(daily.doc, member);
+      if (REJECTED_RE.test(pageText(daily.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
 
-      try {
-        await sleep(randInt(delayMinMs, delayMaxMs));
-        // 等待期间可能已被其它标签页完成
-        if (GM.get(storeKey, '') === today) return 'already-done';
-
-        // Safari / wBlock Scripts 的后台请求与普通 fetch 都不能可靠地产生
-        // V2EX 要求的任务页 Referer，因此改用隐藏的同源页面完成真实导航。
-        if (isSafari()) {
-          const status = await claimWithDailyFrame(page, member);
-          if (status === 'claimed' || status === 'already-claimed') GM.set(storeKey, today);
-          return status;
-        }
-
-        const daily = await loadPage(page, location.href);
-        if (isSignedOut(daily.doc, daily.finalUrl)) return 'signed-out';
-        verifyMember(daily.doc, member);
-        if (REJECTED_RE.test(pageText(daily.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
-
-        if (alreadyRedeemed(daily.doc)) {
-          GM.set(storeKey, today);
-          return 'already-claimed';
-        }
-
-        const redeemUrl = findRedeemUrl(daily.doc);
-        if (!redeemUrl) throw new Error('未找到领取按钮（页面结构可能已变更）');
-
-        const target = validateRedeemUrl(redeemUrl);
-        // 领取请求必须带上任务页作为 Referer
-        const redeem = await loadPage(target.href, page);
-        if (isSignedOut(redeem.doc, redeem.finalUrl)) throw new Error('登录状态已失效');
-        verifyMember(redeem.doc, member);
-        if (REJECTED_RE.test(pageText(redeem.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
-
-        // 领取后 V2EX 通常跳转到 /balance，页面本身不含"已领取"字样，
-        // 因此需要回到任务页确认，而不是把跳转当作失败。
-        let confirmed = alreadyRedeemed(redeem.doc);
-        if (!confirmed) {
-          const verification = await verifyClaimed(page, verifyRetries, verifyIntervalMs, member);
-          if (verification.status === 'signed-out') throw new Error('登录状态已失效');
-          if (verification.status === 'rejected') throw new Error('V2EX 拒绝了当前浏览器环境');
-          confirmed = verification.status === 'claimed';
-        }
-
-        if (!confirmed) throw new RetryableError('领取请求已发送，但服务端未确认成功');
-
-        GM.set(storeKey, today);
-        return 'claimed';
-      } finally {
-        if (GM.get(lockKey, null)?.token === token) GM.set(lockKey, null);
+      if (alreadyRedeemed(daily.doc)) {
+        markConfirmed(storeKey, today, member);
+        return 'already-claimed';
       }
+
+      const redeemUrl = findRedeemUrl(daily.doc);
+      if (!redeemUrl) throw new Error('未找到领取按钮（页面结构可能已变更）');
+
+      const target = validateRedeemUrl(redeemUrl);
+      // 领取请求必须带上任务页作为 Referer
+      const redeem = await loadPage(target.href, page);
+      if (isSignedOut(redeem.doc, redeem.finalUrl)) throw new Error('登录状态已失效');
+      verifyMember(redeem.doc, member);
+      if (REJECTED_RE.test(pageText(redeem.doc))) throw new Error('V2EX 拒绝了当前浏览器环境');
+
+      // 领取后 V2EX 通常跳转到 /balance，页面本身不含"已领取"字样，
+      // 因此需要回到任务页确认，而不是把跳转当作失败。
+      let confirmed = alreadyRedeemed(redeem.doc);
+      if (!confirmed) {
+        const verification = await verifyClaimed(page, verifyRetries, verifyIntervalMs, member);
+        if (verification.status === 'signed-out') throw new Error('登录状态已失效');
+        if (verification.status === 'rejected') throw new Error('V2EX 拒绝了当前浏览器环境');
+        confirmed = verification.status === 'claimed';
+      }
+
+      if (!confirmed) throw new RetryableError('领取请求已发送，但服务端未确认成功');
+
+      markConfirmed(storeKey, today, member);
+      return 'claimed';
     }
 
     function run() {
       if (inFlight) return inFlight;
-      inFlight = execute().then(status => {
-        networkFailures = 0;
-        if (status === 'claimed') {
-          log('签到：领取成功');
-          if (CONFIG.daily.notify) notify('V2EX 签到', '领取成功 ✅');
-        } else if (status === 'already-claimed') {
-          // 已在别处领取过：只记日志，不打扰用户
-          log('签到：今日奖励已领取');
-        } else if (status === 'signed-out') {
-          log('签到：账号未登录，已跳过');
+      clearTimeout(retryTimer);
+      const member = currentMember();
+      // Web Locks belong to the document: navigating away releases them immediately.
+      // Older engines still check the server before claiming, without a persistent lock.
+      const attempt = navigator.locks?.request && member
+        ? navigator.locks.request(`v2ex-daily:${member}`, { ifAvailable: true }, lock => lock ? execute() : 'locked')
+        : execute();
+      inFlight = Promise.resolve(attempt).then(status => {
+        if (status === 'locked') {
+          retryAfter(2000);
+        } else {
+          networkFailures = 0;
+          if (status === 'claimed') log('签到：服务端已确认领取成功');
+          if (status === 'already-claimed') log('签到：服务端已确认今日已领取');
         }
         return status;
       }).catch(err => {
-        const { networkRetries, networkRetryDelayMs, notify: doNotify } = CONFIG.daily;
-        if (err instanceof RetryableError && networkFailures < networkRetries) {
-          networkFailures++;
-          log(`签到暂时失败（第 ${networkFailures}/${networkRetries} 次），稍后重试：`, err);
-          clearTimeout(retryTimer);
-          retryTimer = setTimeout(run, networkRetryDelayMs);
-          return 'retrying';
-        }
-        networkFailures = 0;
-        log('签到失败：', err);
-        if (doNotify) notify('V2EX 签到', `失败：${err?.message || err}`);
+        networkFailures++;
+        // Keep recovering while the page is open; do not abandon the day after 3 failures.
+        const delay = Math.min(60000, 5000 * 2 ** Math.min(networkFailures - 1, 4));
+        log('签到暂未完成，后台自动重试：', err);
+        retryAfter(delay);
         return 'failed';
       }).finally(() => { inFlight = null; });
       return inFlight;
@@ -1494,6 +1431,8 @@
       };
       scheduleMidnightTick();
       document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+      window.addEventListener('online', tick);
+      window.addEventListener('pageshow', tick);
     }
     return { boot, run };
   })();
