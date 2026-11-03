@@ -263,5 +263,41 @@ const { chromium } = require('playwright');
   await page.screenshot({ animations: 'disabled', path: `/tmp/v2ex-unread-${night ? 'night' : 'light'}.png` });
  }
  console.log('PASS native ordinary floor styling and layout-neutral unread highlight in light/night themes');
+ // Current V2EX nested flex header: the old strong.parentElement lookup
+ // missed the body and appended parent links beneath the entire table.
+ await page.evaluate(() => {
+  document.getElementById('Wrapper').classList.remove('Night');
+  window.modernReplies = [27,44,46,61].map((floor,i) => {
+   const cell=document.createElement('div');cell.id='r_modern_'+floor;cell.className='cell';
+   const parent=[0,27,44,27][i];
+   cell.innerHTML=`<table width="100%" cellspacing="0"><tbody><tr><td width="48"><img class="avatar"></td><td width="10"></td><td width="auto"><div class="flex-one-row"><div class="flex-one-row gap10"><strong><a href="/member/user${floor}">user${floor}</a></strong><div class="badges"><div class="badge op">OP</div><div class="badge pro">PRO</div></div><span class="ago">10 月 13 日</span><span class="small fade">♥ 3</span></div><div class="flex-one-row gap10"><a href="#reply">↩</a><span class="no">${floor}</span></div></div><div class="sep5"></div><div class="reply_content">${parent?'#'+parent+' ':''}回复内容</div></td></tr></tbody></table>`;
+   cell.querySelector('a[href="#reply"]').addEventListener('click',e=>{e.preventDefault();window.nativeReplyClicked=true;});
+   return tree.parseReplyCell(cell,i);
+  });
+  tree.renderTree(modernReplies,tree.buildLookupMaps(modernReplies),document.getElementById('test'),'modern');
+ });
+ await page.addStyleTag({content:'.flex-one-row{display:flex;align-items:center;justify-content:space-between}.gap10{gap:10px}'});
+ for (const width of [390,768,1280]) {
+  await page.setViewportSize({width,height:900});await page.waitForTimeout(80);
+  const geometry=await page.locator('#r_modern_44').evaluate(cell=>{
+   const link=cell.querySelector('.reply-parent-link'),head=cell.querySelector('.v2-reply-head');
+   const l=link.getBoundingClientRect(),h=head.getBoundingClientRect(),body=cell.querySelector('.reply_content').getBoundingClientRect();
+   return {inHeader:head.contains(link),inBodyColumn:l.left>=body.left,aboveBody:l.bottom<=body.top,contained:l.right<=h.right,bodyWidth:body.width};
+  });
+  assert.equal(geometry.inHeader,true);assert.equal(geometry.inBodyColumn,true);
+  assert.equal(geometry.aboveBody,true);assert.equal(geometry.contained,true);
+  assert.ok(geometry.bodyWidth>=240);
+  assert.equal(await page.locator('#r_modern_44 .reply-parent-link').innerText(),'#27');
+ }
+ await page.locator('#r_modern_44 a[href="#reply"]').click();
+ assert.equal(await page.evaluate(()=>window.nativeReplyClicked),true);
+ await page.evaluate(()=>tree.renderTree(modernReplies,tree.buildLookupMaps(modernReplies),document.getElementById('test'),'modern'));
+ assert.equal(await page.locator('#r_modern_44 .v2-reply-head').count(),1);
+ assert.equal(await page.locator('#r_modern_44 .rh-details > .reply-parent-link').count(),1);
+ assert.equal(await page.locator('#r_modern_44 .badge').count(),2);
+ await page.locator('#r_modern_46 .reply-parent-link').click();
+ assert.equal(await page.evaluate(()=>location.hash),'#r_modern_44');
+ await page.screenshot({animations:'disabled',path:'/tmp/v2ex-modern-header-fixed.png'});
+ console.log('PASS modern V2EX header: parent links clear of rails, responsive layout, badges, native actions and repeated rendering');
  await browser.close();process.exitCode=failed?1:0;
 })();

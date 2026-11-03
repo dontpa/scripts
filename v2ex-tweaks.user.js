@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.31
+// @version      2.5.32
 // @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
@@ -1852,6 +1852,35 @@
     // 时间维持原位（紧跟用户名）。未读状态直接画在楼层号上，不额外插节点。
     // 结构不符合预期时直接返回，保持 V2EX 原样，不做半吊子改动。
     function layoutReplyHeader(cell) {
+      const body = cell.querySelector('.reply_content');
+      const bodyContainer = body?.parentElement;
+      if (bodyContainer?.querySelector(':scope > .v2-reply-head')) return;
+      // New V2EX markup groups identity and actions in nested flex rows.
+      // Keep the native action nodes (and their handlers), but normalize the
+      // header before adding parent links so they never fall into the rail gutter.
+      const nativeHead = bodyContainer?.querySelector(':scope > .flex-one-row');
+      const nativeIdentity = nativeHead?.querySelector(':scope > .flex-one-row');
+      const nativeActions = nativeHead?.querySelector('.no')?.parentElement;
+      if (nativeIdentity?.querySelector('strong a[href*="/member/"]') &&
+          nativeActions?.parentElement === nativeHead && nativeActions !== nativeIdentity) {
+        nativeHead.classList.remove('flex-one-row');
+        nativeHead.classList.add('v2-reply-head');
+        nativeIdentity.classList.remove('flex-one-row', 'gap10');
+        nativeIdentity.classList.add('rh-details');
+        const identity = document.createElement('span');
+        identity.className = 'rh-id';
+        const meta = document.createElement('span');
+        meta.className = 'rh-meta';
+        for (const node of [...nativeIdentity.childNodes]) {
+          if (node.nodeType === Node.TEXT_NODE && !node.nodeValue.trim()) node.remove();
+          else if (node.nodeType === Node.ELEMENT_NODE &&
+                   (node.classList.contains('ago') || node.matches('.small.fade'))) meta.append(node);
+          else identity.append(node);
+        }
+        nativeIdentity.append(identity, meta);
+        nativeActions.classList.add('fr');
+        return;
+      }
       const strong = cell.querySelector('strong');
       const container = strong?.parentElement;
       if (!container || container.querySelector(':scope > .v2-reply-head')) return;
