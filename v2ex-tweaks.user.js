@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.33
-// @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.34
+// @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -80,8 +80,6 @@
     },
     replies: {
       readKeyPrefix: 'v2_last_read_',
-      pageFetchConcurrency: 4,
-      pageFetchTimeoutMs: 15000,
     },
   };
 
@@ -670,31 +668,6 @@
     #v2ex-new-count-bar strong { color: var(--new-accent); font-weight: 700; }
     #v2ex-new-count-bar .ncb-hint { margin-left: auto; opacity: 0.5; font-size: 11px; }
 
-    #v2ex-loading-bar {
-      padding: 8px; background: #fff;
-      text-align: center; border-bottom: 1px solid #eee;
-      font-size: 12px; color: #999;
-    }
-    .cell[style*="text-align: center"], #bottom-pagination, a[name="last_page"] { display: none; }
-
-    /* ── 多页加载失败重试横幅 ── */
-    #v2ex-retry-banner {
-      padding: 8px 14px;
-      background: #fff8e6; border-bottom: 1px solid #ffe0a0;
-      border-radius: 4px 4px 0 0;
-      font-size: 12px; color: #a06000;
-      display: flex; align-items: center; gap: 10px;
-    }
-    #v2ex-retry-banner button {
-      padding: 2px 10px;
-      border: 1px solid #f0b030; border-radius: 4px;
-      background: #fff; color: #a06000;
-      cursor: pointer; font-size: 12px;
-      transition: background 0.15s;
-    }
-    #v2ex-retry-banner button:hover { background: #fff8e6; }
-    #v2ex-retry-banner button:disabled { opacity: 0.5; cursor: default; }
-
     /* ===== j/k 导航 HUD ===== */
     #v2ex-nav-hud {
       position: fixed; bottom: 28px; right: 28px; z-index: 99998;
@@ -896,9 +869,6 @@
       background: linear-gradient(90deg, #262b3a 0%, #23252b 100%);
       border-bottom-color: #343a4d; color: #93a6d8;
     }
-    #Wrapper.Night #v2ex-loading-bar { background: #23252b; border-bottom-color: #303239; color: #7b818c; }
-    #Wrapper.Night #v2ex-retry-banner { background: #33291a; border-bottom-color: #5a4520; color: #e0b25e; }
-    #Wrapper.Night #v2ex-retry-banner button { background: #2a2d34; border-color: #5a4520; color: #e0b25e; }
     #Wrapper.Night #v2ex-ref-preview { background: #23252b; border-color: #3a3d45; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
     #Wrapper.Night .rp-name { color: #dfe2e8; }
     #Wrapper.Night .rp-content { color: #c2c7d0; }
@@ -1477,7 +1447,7 @@
   })();
 
   // =========================
-  // 5) 功能C：多页合并 + 未读标记 + 悬停引用预览
+  // 5) 功能C：原生布局 + 未读标记 + 悬停引用预览
   // =========================
   const Replies = (() => {
 
@@ -1503,35 +1473,6 @@
         memberName, memberLink: authorEl.href, memberAvatar: avatarEl?.src || '',
         content, floor, floorNum, likes,
       };
-    }
-
-    // 其它分页的 HTML 要解析成文档再把楼层搬进当前页面。在沙箱环境里
-    // （Firefox 的 Xray）DOMParser 建出的文档和页面文档主体不同，跨文档搬运
-    // 可能失败，所以优先用页面自己的 document.implementation 建文档。
-    function parseReplyDoc(html) {
-      try {
-        const doc = document.implementation.createHTMLDocument('');
-        doc.documentElement.innerHTML = html;
-        if (doc.querySelector('div.cell[id^="r_"]')) return doc;
-      } catch (err) {
-        log('createHTMLDocument 解析失败，回退 DOMParser：', err);
-      }
-      return new DOMParser().parseFromString(html, 'text/html');
-    }
-
-    function extractRepliesFromDoc(doc) {
-      // 外来文档的节点先 importNode 成本页面拥有的节点，避免依赖 appendChild 的隐式 adopt
-      const foreign = doc !== document;
-      return Array.from(doc.querySelectorAll('div.cell[id^="r_"]'))
-        .map((cell, idx) => {
-          let node = cell;
-          if (foreign) {
-            try { node = document.importNode(cell, true); }
-            catch (err) { log('importNode 失败，直接使用原节点：', err); }
-          }
-          return parseReplyCell(node, idx);
-        })
-        .filter(Boolean);
     }
 
     // ── Map 构建，O(n)，供悬停引用预览使用 ──
@@ -1565,14 +1506,6 @@
       return best;
     }
 
-    // 保留原生回复节点和头部结构，按楼层顺序合并分页。
-    function renderReplies(replies, container) {
-      const fragment = document.createDocumentFragment();
-      for (const reply of replies) fragment.append(reply.element);
-      container.replaceChildren(fragment);
-      document.dispatchEvent(new Event('v2ex:replies-updated'));
-    }
-
     // ── 未读标记 ──
     // 阅读进度走 GM 存储而不是 localStorage：脚本 @match 了 v2ex.com /
     // www.v2ex.com / edge.v2ex.com 三个 origin，localStorage 按 origin 隔离，
@@ -1604,15 +1537,11 @@
       return newCount;
     }
 
-    // 只推进到"从 1 楼起连续加载成功"的那个楼层，而不是见到的最大楼层：
-    // 中间某页抓失败时，它后面的页照样会带来更大的楼层号，直接存 max 会把
-    // 失败页里那几十楼永久标成已读。取连续前缀就能带着缺口安全地存进度，
-    // 不必像以前那样"只要有一页失败就整个不写"——那会让这个帖子永远停在
-    // firstVisit，之后的新回复一条都标不出来。
+    // 在已有进度上仅推进连续出现的楼层，避免把未访问分页里的回复标成已读。
     function commitReadState(state, replies) {
       const floors = new Set();
       for (const r of replies) floors.add(r.floorNum);
-      let contiguous = 0;
+      let contiguous = state.firstVisit ? 0 : state.lastReadFloor;
       while (floors.has(contiguous + 1)) contiguous++;
       // 进度只前进不后退；firstVisit 时哪怕是 0 也要落一笔，把"没进过"翻成"进过"
       if (!state.firstVisit && contiguous <= state.lastReadFloor) return;
@@ -1818,222 +1747,24 @@
       }
     }
 
-    function getTotalPages() {
-      const candidates = [1];
-      const max = Number.parseInt(document.querySelector('.page_input')?.getAttribute('max') || '', 10);
-      if (Number.isSafeInteger(max)) candidates.push(max);
-      document.querySelectorAll('a.page_normal, .page_current').forEach(el => {
-        const fromText = Number.parseInt(el.textContent || '', 10);
-        if (Number.isSafeInteger(fromText)) candidates.push(fromText);
-        try {
-          const fromUrl = Number.parseInt(new URL(el.href, location.href).searchParams.get('p') || '', 10);
-          if (Number.isSafeInteger(fromUrl)) candidates.push(fromUrl);
-        } catch (_) {}
-      });
-      return Math.max(...candidates);
-    }
-
-    function pageUrl(page) {
-      const url = new URL(location.href);
-      url.searchParams.set('p', String(page));
-      url.hash = '';
-      return url.href;
-    }
-
-    async function fetchReplyPage(page) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), CONFIG.replies.pageFetchTimeoutMs);
-      try {
-        const res = await fetch(pageUrl(page), {
-          credentials: 'include',
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const doc = parseReplyDoc(await res.text());
-        const replies = extractRepliesFromDoc(doc);
-        if (!replies.length) throw new Error('页面中没有回复');
-        return replies;
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-
-    async function fetchPages(pages, onProgress) {
-      if (!pages.length) return [];
-      const results = new Array(pages.length);
-      let cursor = 0;
-      let completed = 0;
-      const worker = async () => {
-        while (cursor < pages.length) {
-          const index = cursor++;
-          const page = pages[index];
-          try {
-            results[index] = { page, replies: await fetchReplyPage(page) };
-          } catch (error) {
-            results[index] = { page, replies: null, error };
-          } finally {
-            completed++;
-            onProgress?.(completed, pages.length);
-          }
-        }
-      };
-      const workerCount = Math.min(CONFIG.replies.pageFetchConcurrency, pages.length);
-      await Promise.all(Array.from({ length: workerCount }, () => worker()));
-      return results;
-    }
-
-    // 个别页失败多半是并发触发的限流，静默重试一次再打扰用户。
-    // 全军覆没则更可能是断网/掉登录，直接交给横幅让用户决定，避免再空等一轮超时。
-    async function fetchPagesWithRetry(pages, onProgress) {
-      const results = await fetchPages(pages, onProgress);
-      const failedIndexes = results
-        .map((result, index) => (result.replies ? -1 : index))
-        .filter(index => index >= 0);
-      if (!failedIndexes.length || failedIndexes.length === results.length) return results;
-
-      await sleep(600);
-      const retried = await fetchPages(failedIndexes.map(index => results[index].page));
-      failedIndexes.forEach((resultIndex, i) => {
-        if (retried[i]?.replies) results[resultIndex] = retried[i];
-      });
-      return results;
-    }
-
-    function normalizeReplies(replies) {
-      const byId = new Map();
-      for (const reply of replies) {
-        if (!byId.has(reply.id)) byId.set(reply.id, reply);
-      }
-      const normalized = [...byId.values()].sort((a, b) => a.floorNum - b.floorNum);
-      normalized.forEach((reply, index) => { reply.index = index; });
-      return normalized;
-    }
-
-    // ── 主流程 ──
-    async function init() {
+    function boot() {
       if (!isTopicPage()) return;
       const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
       if (!topicId) return;
-
-      const replyBox = Array.from(document.querySelectorAll('.box')).find(b => b.querySelector('div[id^="r_"]'));
-      if (!replyBox) {
-        // 帖子此刻还没有回复也要落一条进度：不然下次进来 stored 仍是 null、
-        // 被当成首次访问，期间攒下的新回复一条都不会被标记。
-        // （从首页点进刚发出来的新帖，就是这条路径。）
-        const emptyState = createReadState(topicId);
-        if (emptyState.firstVisit) commitReadState(emptyState, []);
-        log('回复合并：没找到回复容器（.box 内无 div[id^="r_"]），已跳过');
-        return;
-      }
-
-      const loadingBar = document.createElement('div');
-      loadingBar.id = 'v2ex-loading-bar'; loadingBar.textContent = '加载中…';
-      replyBox.parentNode.insertBefore(loadingBar, replyBox);
-
-      const totalPages = getTotalPages();
-      let allReplies = extractRepliesFromDoc(document);
-      const requestedPage = Number.parseInt(new URLSearchParams(location.search).get('p') || '1', 10);
-      const currentPage = Number.isSafeInteger(requestedPage) && requestedPage >= 1 && requestedPage <= totalPages
-        ? requestedPage
-        : 1;
-      const pages = Array.from({ length: totalPages }, (_, i) => i + 1).filter(page => page !== currentPage);
-      const pageResults = await fetchPagesWithRetry(pages, (completed, total) => {
-        loadingBar.textContent = `加载回复页 ${completed} / ${total}…`;
-      });
-
-      const failedPages = pageResults.filter(result => !result.replies).map(result => result.page);
-      for (const result of pageResults) {
-        if (result.replies) allReplies.push(...result.replies);
-        else log(`Reply page ${result.page} failed:`, result.error);
-      }
-
-      allReplies = normalizeReplies(allReplies);
-      document.querySelectorAll('.page_input, .page_current, .page_normal').forEach(el => el.remove());
-
-      // let 以便 doRetry 内可重新赋值
-      let maps = buildLookupMaps(allReplies);
+      // 官方楼中楼的 DOM 顺序与楼层编号不同。只整理内存中的索引，
+      // 不移动回复节点，不改写层级、折叠控件、锚点或分页。
+      const replies = Array.from(document.querySelectorAll('div.cell[id^="r_"]'))
+        .map(parseReplyCell).filter(Boolean).sort((a, b) => a.floorNum - b.floorNum);
+      replies.forEach((reply, index) => { reply.index = index; });
       const readState = createReadState(topicId);
-      let newCount = markUnread(readState, allReplies);
-      renderReplies(allReplies, replyBox);
-      UserTags.decorate(replyBox);
-
-      loadingBar.remove();
-      log(`回复合并：${allReplies.length} 条回复 / 共 ${totalPages} 页（失败 ${failedPages.length} 页），`
-        + `未读 ${newCount} 条`);
-      document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
-      updateNewCountBar(replyBox, newCount);
-      commitReadState(readState, allReplies);
-
-      let hoverTimer = null;
-      const scheduleHoverPreview = () => {
-        clearTimeout(hoverTimer);
-        // 250ms > B64 观察器的 150ms 防抖窗口：等它把本批 DOM 改完再挂预览，
-        // 否则悬停预览可能落在尚未解码的原始文本上。
-        hoverTimer = setTimeout(() => initHoverPreview(allReplies, maps), 250);
-      };
-
-      // ── 失败页重试（支持递归多次重试）──
-      if (failedPages.length > 0) {
-        const banner = document.createElement('div');
-        banner.id = 'v2ex-retry-banner';
-        replyBox.parentNode.insertBefore(banner, replyBox);
-
-        const attachRetry = pagesToRetry => {
-          const text = document.createElement('span');
-          text.textContent = `⚠️ 第 ${pagesToRetry.join('、')} 页加载失败`;
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.textContent = '重试';
-          banner.replaceChildren(text, btn);
-          btn.addEventListener('click', async () => {
-            btn.textContent = '重试中…'; btn.disabled = true;
-
-            const results = await fetchPages(pagesToRetry, (completed, total) => {
-              btn.textContent = `重试中 ${completed}/${total}…`;
-            });
-            const stillFailed = [];
-            const newReplies = [];
-            for (const result of results) {
-              if (result.replies) newReplies.push(...result.replies);
-              else {
-                stillFailed.push(result.page);
-                log(`Reply page ${result.page} retry failed:`, result.error);
-              }
-            }
-
-            if (newReplies.length > 0) {
-              allReplies = normalizeReplies([...allReplies, ...newReplies]);
-              maps = buildLookupMaps(allReplies);
-              newCount = markUnread(readState, allReplies);
-              renderReplies(allReplies, replyBox);
-              UserTags.decorate(replyBox);
-              updateNewCountBar(replyBox, newCount);
-              // 补回来的页可能填上了缺口，让连续前缀继续往前走；
-              // 哪怕还有别的页没救回来，这一段进度也该存下
-              commitReadState(readState, allReplies);
-              scheduleHoverPreview();
-            }
-
-            if (stillFailed.length > 0) {
-              attachRetry(stillFailed); // 仍有失败页 → 重新挂载按钮
-            } else {
-              banner.remove();
-            }
-          }, { once: true });
-        };
-        attachRetry([...failedPages]);
-      }
-
-      // 等待 B64 的防抖扫描完成本轮 DOM 处理（见 scheduleHoverPreview 的延时说明）。
-      scheduleHoverPreview();
-    }
-
-    function boot() {
-      init().catch(err => {
-        document.getElementById('v2ex-loading-bar')?.remove();
-        log('Replies error:', err);
-      });
+      const newCount = markUnread(readState, replies);
+      const replyBox = replies[0]?.element.closest('.box');
+      if (replyBox) updateNewCountBar(replyBox, newCount);
+      commitReadState(readState, replies);
+      document.dispatchEvent(new Event('v2ex:replies-updated'));
+      // 等待 Base64 本轮处理结束，再给正文引用绑定预览。
+      setTimeout(() => initHoverPreview(replies, buildLookupMaps(replies)), 250);
+      log(`原生回复布局：${replies.length} 条回复，未读 ${newCount} 条`);
     }
     return { boot };
   })();
@@ -3892,7 +3623,7 @@
       });
       refreshMenu();
       // 在默认导航发生前设置 target，保留浏览器原生的新标签页和容器行为。
-      // 委托监听也覆盖分页合并后才出现的链接。
+      // 委托监听也覆盖动态加载后才出现的链接。
       document.addEventListener('click', event => {
         if (!enabled || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         const anchor = event.target.closest?.('a[href]');

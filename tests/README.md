@@ -15,8 +15,8 @@ node tests/v2ex-performance.cjs
 ```
 
 - `v2ex-daily.cjs`: deterministic sign-in lock expiry and server confirmation.
-- `v2ex-replies.cjs`: flat reply order, native header preservation, retained event
-  listeners, and absence of tree controls and reply-input interception.
+- `v2ex-replies.cjs`: native thread order and nested containers, native collapse/reply
+  controls, visible pagination, no page fetches, and safe unread progress.
 - `v2ex-new-tab.cjs`: native default navigation, opt-in new-tab opening for topic
   and member links, the persistent userscript-manager menu switch, and preserved
   floor/external-link behavior.
@@ -25,13 +25,9 @@ node tests/v2ex-performance.cjs
   of all userscript menu entries on managers without in-place updates.
 - `v2ex-tag-menu.cjs`: userscript-manager tag export and import, including the
   existing merge preview and confirmation before stored tags change.
-- `v2ex-performance.cjs`: repeat rendering of 400 replies,
-  unread navigation caching, batched scans, incremental Base64 and Imgur handling.
+- `v2ex-performance.cjs`: 400-reply unread navigation caching, batched scans, incremental Base64 and Imgur handling.
   Timings are diagnostic; correctness assertions are the pass/fail criteria.
 
 The tests use local fixtures and stub requests; they do not sign in to a real
 account or modify live V2EX data. They do not replace checking the installed
 userscript in each supported browser.
-
-For performance comparisons, set `V2EX_BASELINE_FILE` to a script with the same
-flat reply UI. Older tree layouts are intentionally incompatible.

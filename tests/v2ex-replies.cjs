@@ -4,35 +4,67 @@ const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 (async () => {
   const source = fs.readFileSync(path.join(__dirname, '../v2ex-tweaks.user.js'), 'utf8');
-  assert.doesNotMatch(source, /ThreadTree|reply-tree|reply-branch-toggle|initReplyFloorReference/);
+  assert.doesNotMatch(source, /ThreadTree|reply-tree|reply-branch-toggle|initReplyFloorReference|renderReplies|fetchReplyPage|#bottom-pagination/);
   const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined });
   try {
     const page = await browser.newPage();
-    await page.setContent('<div class="box" id="replies"></div>');
-    const module = source.slice(source.indexOf('  const Replies ='), source.indexOf('  // 6) 功能D'))
-      .replace('return { boot };', 'return { renderReplies, parseReplyCell, normalizeReplies };');
-    await page.evaluate(module + '\nwindow.repliesModule = Replies;');
-    const result = await page.evaluate(() => {
-      const box = document.getElementById('replies');
-      const cells = [3, 1, 2].map(n => {
-        const cell = document.createElement('div');
-        cell.className = 'cell'; cell.id = `r_${n}`;
-        cell.innerHTML = `<div class="fr"><a href="#reply_content" onclick="this.dataset.native='yes'">回复</a><span class="no">${n}</span></div><strong><a href="/member/user">user</a></strong><span class="ago">1h</span><div class="reply_content">@user #1 reply</div>`;
-        return cell;
+    await page.route('**/*', route => route.fulfill({body: '<body></body>', contentType: 'text/html'}));
+    await page.goto('https://edge.v2ex.com/t/1?p=2');
+    const module = source.slice(source.indexOf('  const Replies ='), source.indexOf('  // 6) 功能D'));
+    const styles = [];
+    for (const match of source.matchAll(/addStyle\(`([\s\S]*?)`\);/g)) styles.push(match[1]);
+    await page.addStyleTag({content: styles.join('\n')});
+    for (const mode of ['reply-threads-d', 'reply-threads-c', '']) {
+      await page.setContent(`<div id="Main"><div class="box reply-threads ${mode}" id="replies"><div class="cell" style="text-align: center"><a class="page_normal" href="?p=1">1</a><span class="page_current">2</span><input class="page_input"></div><div id="native-group"></div><div id="bottom-pagination"><a name="last_page" href="?p=3">3</a></div></div></div>`);
+      await page.addStyleTag({content: styles.join('\n')});
+      await page.evaluate(() => {
+        window.CONFIG = {replies: {readKeyPrefix: 'test-read-'}};
+        window.log = () => {}; window.isTopicPage = () => true;
+        window.saved = [];
+        window.GM = {get: () => 49, set: (...args) => saved.push(args)};
+        window.fetch = () => { throw new Error('Replies must not fetch other pages'); };
+        const group = document.getElementById('native-group');
+        window.cells = [51, 55, 52, 54, 53].map((n, i) => {
+          const cell = document.createElement('div');
+          cell.className = 'cell'; cell.id = `r_${n}`;
+          cell.dataset.depth = i % 2; cell.style.setProperty('--depth', i % 2);
+          cell.innerHTML = `<div class="fr"><a href="#reply_content" onclick="this.dataset.native='yes'">回复</a><span class="no">${n}</span></div><strong><a href="/member/user">user</a></strong><div class="reply_content">hello</div>`;
+          group.append(cell); return cell;
+        });
+        const toggle = document.createElement('button'); toggle.id = 'native-toggle';
+        toggle.textContent = '折叠'; toggle.onclick = () => cells[1].hidden = !cells[1].hidden;
+        group.prepend(toggle);
+        window.original = group.innerHTML;
+        window.changes = [];
+        new MutationObserver(records => changes.push(...records.filter(r => r.type === 'childList')))
+          .observe(document.getElementById('replies'), {childList: true, subtree: true});
+        window.clicks = 0; cells[0].addEventListener('click', () => clicks++);
       });
-      const before = cells.map(cell => cell.outerHTML);
-      let clicks = 0, updates = 0;
-      cells[0].addEventListener('click', () => clicks++);
-      document.addEventListener('v2ex:replies-updated', () => updates++);
-      const replies = repliesModule.normalizeReplies(cells.map(repliesModule.parseReplyCell));
-      repliesModule.renderReplies(replies, box);
-      repliesModule.renderReplies(replies, box);
-      const unchanged = cells.every((cell, i) => cell.outerHTML === before[i]);
-      cells[0].querySelector('a').click();
-      return { order: [...box.children].map(cell => cell.id), unchanged, clicks, updates,
-        native: cells[0].querySelector('a').dataset.native, wrappers: box.querySelectorAll('.reply-wrapper,svg,button').length };
-    });
-    assert.deepEqual(result, { order: ['r_1', 'r_2', 'r_3'], unchanged: true, clicks: 1, updates: 2, native: 'yes', wrappers: 0 });
-    console.log('PASS flat reply order, native markup/actions, node reuse and navigation updates');
+      await page.evaluate(module + '\nReplies.boot();');
+      await page.waitForTimeout(300);
+      const result = await page.evaluate(() => {
+        const group = document.getElementById('native-group');
+        const allUnread = cells.every(cell => cell.classList.contains('reply-new'));
+        cells.forEach(cell => { cell.classList.remove('reply-new'); cell.querySelector('.no').removeAttribute('title'); });
+        const unchanged = group.innerHTML === original;
+        cells[0].querySelector('a').click();
+        document.getElementById('native-toggle').click();
+        return {unchanged, allUnread, order: cells.map(c => c.querySelector('.no').textContent),
+          actual: [...group.querySelectorAll('.cell')].map(c => c.querySelector('.no').textContent),
+          mutations: changes.length, clicks, native: cells[0].querySelector('a').dataset.native,
+          collapsed: cells[1].hidden, saved,
+          pagination: [...document.querySelectorAll('.page_normal,.page_current,.page_input,#bottom-pagination,a[name="last_page"]')].every(e => e.getClientRects().length > 0)};
+      });
+      assert.equal(result.unchanged, true, mode);
+      assert.equal(result.allUnread, true);
+      assert.deepEqual(result.actual, ['51','55','52','54','53']);
+      assert.equal(result.mutations, 0);
+      assert.equal(result.clicks, 1);
+      assert.equal(result.native, 'yes');
+      assert.equal(result.collapsed, true);
+      assert.equal(result.pagination, true);
+      assert.deepEqual(result.saved, [], 'a later page must not advance past unloaded replies');
+    }
+    console.log('PASS native threaded/flat order, nested containers, collapse and reply controls, pagination, no page fetches, and safe unread progress');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
