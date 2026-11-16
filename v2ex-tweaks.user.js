@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.32
-// @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；回复自动带楼层号；回复嵌套树 + 合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；折叠状态持久化；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
+// @version      2.5.33
+// @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；合并分页；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；多页加载失败重试；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
 // @match        https://www.v2ex.com/*
@@ -78,8 +78,7 @@
       proxyEnabled: true,
       storeKey: 'v2ex_imgur_proxy_enabled',
     },
-    threadTree: {
-      collapseKeyPrefix: 'v2_collapse_',
+    replies: {
       readKeyPrefix: 'v2_last_read_',
       pageFetchConcurrency: 4,
       pageFetchTimeoutMs: 15000,
@@ -121,7 +120,7 @@
   }
 
   // 不是所有管理器都提供 GM_addStyle（Greasemonkey 只有 GM.addStyle），
-  // 缺了它就直接抛异常、整个脚本停在这里——楼层树连跑都没跑。退回自己插 <style>。
+  // 缺了它就直接抛异常、整个脚本停在这里——后续功能无法启动。退回自己插 <style>。
   function addStyle(css) {
     try {
       if (typeof GM_addStyle === 'function') return GM_addStyle(css);
@@ -642,143 +641,13 @@
   `);
 
   if (isTopicPage()) addStyle(`
-    /* ===== 楼层树 ===== */
+    /* ===== 未读回复 ===== */
     :root {
-      --indent-width: 18px;
-      --rail-gap: 13px;      /* 竖导轨到子回复左边缘的横向距离 = 肘接横线的长度 */
-      --rail-width: 1px;     /* 1px 的细线比 2px 干净得多，靠透明度补可见性 */
-      --elbow-top: 19px;     /* 肘接横线的高度，对准子回复头像的上半部 */
-      --line-color: #b5bfc9;
-      --line-hover: #7fa0f5;
-      --bg-hover: #fafbff;
       --new-accent: #4a7af0;
-      --reply-muted: #687480;
-      --reply-surface: var(--box-background-color, #fff);
-      --reply-toggle-ink: #8093a5;
-      --reply-toggle-bg: #f1f5f8;
-      --reply-toggle-hover: #e7eef4;
-      /* 未读提示只出现在楼层号：柔和底色增加识别度，不另加边框。 */
       --new-pill-bg: #e8efff;
       --new-pill-fg: #365fbe;
     }
 
-    .box { padding-bottom: 0 !important; }
-
-    /* Avatars are the only nodes; the root keeps its original horizontal position. */
-    .reply-tree { position: relative; --reply-indent: 28px; }
-    .reply-row { position: relative; margin-left: calc(var(--reply-level) * var(--reply-indent)); }
-    .reply-row[hidden], .reply-row [hidden] { display: none !important; }
-    .reply-row > .cell { position: relative; min-width: 0; }
-    .reply-connectors { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-    .reply-connectors path { fill: none; stroke: var(--reply-connector, #dfe1e4); stroke-width: 1; }
-    .reply-parent-highlight { background: var(--bg-hover) !important; }
-    .reply-parent-link {
-      display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
-      padding: 2px 4px; border-radius: 4px; font-size: 12px; line-height: 1.6;
-      color: var(--reply-muted) !important; text-decoration: none; white-space: nowrap;
-    }
-    .reply-parent-link svg { width: 14px; height: 14px; flex: none; }
-    .reply-parent-link:hover { color: var(--new-accent) !important; background: var(--bg-hover); }
-    .reply-branch-toggle {
-      position: absolute; z-index: 1; display: grid; place-items: center; width: 24px; height: 24px;
-      border: 0; border-radius: 4px; padding: 0; background: transparent;
-      color: var(--reply-toggle-ink); font: 16px/1 system-ui; cursor: pointer; touch-action: manipulation;
-    }
-    /* Compact visible badge inside the unchanged 24px hit area. */
-    .reply-branch-toggle::before {
-      content: ''; position: absolute; width: 16px; height: 16px; border-radius: 4px;
-      background: var(--reply-toggle-bg);
-    }
-    .reply-branch-toggle svg { position: relative; width: 12px; height: 12px; stroke-width: 1.8; pointer-events: none; }
-    .reply-branch-toggle:hover::before {
-      background: var(--reply-toggle-hover);
-    }
-    .reply-branch-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
-    .reply-collapsed-hint:hover { color: var(--new-accent); background: var(--bg-hover); }
-    .reply-branch-toggle:focus-visible, .reply-collapsed-hint:focus-visible, .reply-parent-link:focus-visible {
-      outline: 2px solid var(--new-accent); outline-offset: 2px;
-    }
-    .reply-collapsed-hint { display: block; padding: 8px 0 0; border: 0; background: transparent; color: var(--reply-muted); font: inherit; font-size: 12px; cursor: pointer; }
-    .reply-wrapper > .cell > table { table-layout: fixed; }
-    .reply-wrapper .reply_content { overflow-wrap: anywhere; }
-    .reply-wrapper .reply_content pre { max-width: 100%; overflow-x: auto; }
-    .reply-wrapper .reply_content img { max-width: 100%; height: auto; }
-    .reply-wrapper .v2-reply-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
-    .rh-details { display: flex; align-items: center; flex-wrap: wrap; min-width: 0; gap: 4px 8px; }
-    .reply-wrapper .v2-reply-head > .fr { grid-column: 2; grid-row: 1; white-space: nowrap; }
-    .reply-wrapper .v2-reply-head .rh-id { max-width: 100%; }
-    .reply-wrapper .v2-reply-head .rh-meta {
-      flex: 0 1 auto; min-width: 0; flex-wrap: wrap; white-space: normal; gap: 4px 8px;
-      color: var(--reply-muted); overflow-wrap: anywhere;
-    }
-    .reply-wrapper .v2-reply-head .ago, .reply-wrapper .v2-reply-head .fade {
-      color: var(--reply-muted); font-size: 12px !important; line-height: 1.5;
-    }
-    @media (max-width: 600px) {
-      .reply-tree { --reply-indent: 24px; }
-      .reply-wrapper .v2-reply-head { gap: 4px 8px; }
-      .reply-wrapper .v2-reply-head .rh-gap { display: none; }
-      .reply-wrapper .v2-reply-head .rh-meta { flex-basis: 100%; }
-      .reply-wrapper > .cell > table > tbody > tr > td:first-child { width: 32px; }
-    }
-    @media (pointer: coarse) {
-      .reply-parent-link, .reply-collapsed-hint { min-height: 44px; min-width: 44px; box-sizing: border-box; }
-    }
-
-    /* 分隔线与内边距沿用 V2EX 原装（--box-border-color 由 V2EX 定义，夜间模式会自动切换），
-       之前自己写死的 #f5f5f5 在白底上几乎看不见 */
-    .reply-wrapper .cell {
-      padding: 10px !important;
-      border-bottom: 0 !important;
-      background: transparent;
-      transition: background 0.12s;
-    }
-    .reply-row > .cell::after { content: ''; position: absolute; left: 68px; right: 0; bottom: 0; height: 1px; background: var(--box-border-color, rgba(128,128,128,.228)); }
-    @media (max-width: 600px) { .reply-row > .cell::after { left: 52px; } }
-    @media (hover: hover) and (pointer: fine) {
-      .reply-wrapper > .cell:hover { background-color: var(--bg-hover); }
-    }
-    .reply-wrapper .avatar {
-      display: block;
-      width: 100% !important; min-width: 0 !important; max-width: 100% !important;
-      height: auto !important; min-height: 0 !important; max-height: none !important;
-      aspect-ratio: 1 / 1; object-fit: cover; flex: none;
-      max-inline-size: 100% !important;
-      border-radius: 4px; margin: 0 auto;
-    }
-    .reply_content { font-size: 14px; line-height: 1.5; margin-top: 2px; }
-    .ago, .fade { font-size: 11px !important; }
-
-    /* ===== 回复头部 =====
-       时间保持 V2EX 原来的位置——紧跟用户名，宽度随内容，不占定宽列。
-       [用户名 ●标签] [时间 ♥95] ——弹性留白—— [♥ ↩] [19]
-       弹性留白吃掉所有宽度差，右端那组按钮 + 楼层号整体贴住行右边缘。 */
-    .v2-reply-head { display: flex; align-items: center; gap: 4px 8px; min-width: 0; }
-    .v2-reply-head .rh-id {
-      display: flex; align-items: center; gap: 4px;
-      flex: 0 1 auto; min-width: 0;
-    }
-    .v2-reply-head .rh-id > strong {
-      display: inline-flex; align-items: center;
-      flex: 0 1 auto; min-width: 0;
-    }
-    /* 只让用户名本身省略号截断，标签胶囊永远完整显示 */
-    .v2-reply-head .rh-id > strong > a {
-      min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .v2-reply-head .rh-id .v2t-slot { flex: 0 0 auto; }
-    /* 时间 + ♥ 计数：跟在用户名后面，宽度随内容 */
-    .v2-reply-head .rh-meta {
-      display: flex; align-items: center; gap: 8px;
-      flex: 0 0 auto; white-space: nowrap;
-    }
-    .v2-reply-head .rh-gap { flex: 1 1 auto; min-width: 8px; }
-    /* 感谢/回复按钮 + 楼层号：整体右边缘贴住行的右边缘（同 V2EX 原样） */
-    .v2-reply-head > .fr {
-      float: none !important;
-      display: inline-flex; align-items: center;
-      flex: 0 0 auto; margin: 0 !important;
-    }
     /* 普通楼层号完全沿用 V2EX 原生样式；未读仅在原有数字上叠加颜色。
        外扩的浅色底不占布局空间，字号、字重和内边距都保持原样。 */
     .cell.reply-new .fr .no,
@@ -846,7 +715,7 @@
     #v2ex-nav-hud .hud-count { font-weight: 600; color: #c5d5ff; font-variant-numeric: tabular-nums; }
     #v2ex-nav-hud .hud-sep { opacity: 0.2; }
     #v2ex-nav-hud .hud-hint { opacity: 0.35; font-size: 11px; font-family: monospace; }
-    .reply-nav-active > .cell { outline: 2px solid rgba(74,122,240,0.50) !important; outline-offset: -2px; transition: outline 0.15s ease; }
+    .cell.reply-nav-active { outline: 2px solid rgba(74,122,240,0.50) !important; outline-offset: -2px; transition: outline 0.15s ease; }
 
     /* ===== Base64 解码 ===== */
     .v2-b64-wrap {
@@ -1013,27 +882,16 @@
 
     /* ===== 夜间模式适配 ===== */
     #Wrapper.Night {
-      --reply-connector: #484c52;
-      --line-color: #50555e;
-      --line-hover: #6c8fe8;
-      --bg-hover: #2a2d34;
       --new-accent: #6f97ff;
-      --reply-muted: #a4adb9;
-      --reply-surface: var(--box-background-color, #23252b);
-      --reply-toggle-ink: #9aaebe;
-      --reply-toggle-bg: #303942;
-      --reply-toggle-hover: #394652;
       --new-pill-bg: #303d59;
       --new-pill-fg: #b4c8ff;
     }
-    #Wrapper.Night .reply-wrapper .cell { border-bottom-color: #303239 !important; }
     /* 夜间仅调整未读色值，普通楼层号仍交给站点主题。 */
     #Wrapper.Night .cell.reply-new .fr .no,
     #Wrapper.Night .cell.reply-new:hover .fr .no {
       color: var(--new-pill-fg) !important;
       background: var(--new-pill-bg) !important;
     }
-    #Wrapper.Night .reply-collapsed-hint { color: var(--reply-muted); }
     #Wrapper.Night #v2ex-new-count-bar {
       background: linear-gradient(90deg, #262b3a 0%, #23252b 100%);
       border-bottom-color: #343a4d; color: #93a6d8;
@@ -1057,12 +915,6 @@
     #Wrapper.Night .card-content { color: #d3d7de; }
     #Wrapper.Night .card-content pre { background: #1c1e23; border-color: #303239; }
     #Wrapper.Night .floor-tag { background: #2b2e35; color: #7b818c; }
-    @media (prefers-reduced-motion: reduce) {
-      .reply-wrapper .cell, .reply-parent-link,
-      .reply-branch-toggle, .reply-branch-toggle svg, .reply-collapsed-hint {
-        transition: none !important;
-      }
-    }
   `);
 
   // =========================
@@ -1625,74 +1477,9 @@
   })();
 
   // =========================
-  // 5) 功能C：楼层树 + 多页 + 折叠持久化 + 悬停引用预览
+  // 5) 功能C：多页合并 + 未读标记 + 悬停引用预览
   // =========================
-  const ThreadTree = (() => {
-
-    // 楼层引用只应来自普通正文。按独立文本节点扫描，避免 textContent
-    // 把 <br> 两边拼在一起（例如链接以 # 结尾、下一行以 3. 开头时会伪造 #3）。
-    // 同时忽略链接和代码块，防止 URL / 示例代码中的 #数字 被当成回复引用。
-    const FLOOR_REF_EXCLUDED_TAGS = new Set(['A', 'CODE', 'PRE', 'SCRIPT', 'STYLE']);
-
-    function extractFloorReferences(contentEl) {
-      const floors = [];
-
-      const stack = [contentEl];
-      while (stack.length) {
-        const node = stack.pop();
-        if (node.nodeType === Node.TEXT_NODE) {
-          for (const match of (node.nodeValue || '').matchAll(/#(\d+)/g)) floors.push(match[1]);
-        } else if (node.nodeType === Node.ELEMENT_NODE && !FLOOR_REF_EXCLUDED_TAGS.has(node.tagName)) {
-          for (let child = node.lastChild; child; child = child.previousSibling) stack.push(child);
-        }
-      }
-      return floors;
-    }
-
-    // V2EX 原生 replyOne() 只会在输入框里写入“@用户名 ”。在捕获阶段记住
-    // 点击前的内容，等原生 onclick 执行完后，再只改写它刚追加的那段，得到
-    // “@用户名 #楼层号 ”；这样不会误改用户已经输入的正文。这里必须用下一轮
-    // task，不能用微任务：浏览器可能在捕获监听器结束后、目标 onclick 执行前
-    // 就清空微任务队列，导致过早检查输入框而漏掉本次回复。
-    function initReplyFloorReference() {
-      if (document._v2ReplyFloorBound) return;
-      document._v2ReplyFloorBound = true;
-
-      document.addEventListener('click', event => {
-        const button = event.target.closest?.('[onclick*="replyOne("]');
-        if (!button) return;
-
-        const cell = button.closest('div.cell[id^="r_"]');
-        const input = document.getElementById('reply_content');
-        const memberName = (cell?.querySelector('strong a[href*="/member/"]')?.textContent || '').trim();
-        const floorNum = Number((cell?.querySelector('.no')?.textContent || '').match(/\d+/)?.[0]);
-        if (!cell || !input || !memberName || !Number.isSafeInteger(floorNum)) return;
-
-        const before = input.value;
-        const nativePrefix = `@${memberName} `;
-        const floorPrefix = `@${memberName} #${floorNum} `;
-
-        setTimeout(() => {
-          if (!input.isConnected) return;
-          const current = input.value;
-          let next = null;
-
-          if (!before && current === nativePrefix) {
-            next = floorPrefix;
-          } else if (before && current === `${before}\n${nativePrefix}`) {
-            next = `${before}\n${floorPrefix}`;
-          } else if (before === nativePrefix && !current) {
-            // 原生逻辑在输入框恰好等于同一个 @ 前缀时会清空内容。
-            next = floorPrefix;
-          }
-
-          if (next === null) return;
-          input.value = next;
-          input.focus();
-          input.setSelectionRange?.(next.length, next.length);
-        }, 0);
-      }, true);
-    }
+  const Replies = (() => {
 
     // ── 解析单条回复 ──
     function parseReplyCell(cell, idx) {
@@ -1711,16 +1498,10 @@
       if (!Number.isSafeInteger(floorNum)) return null;
       const likesText  = cell.querySelector('span.small')?.textContent || '';
       const likes      = Number(likesText.match(/\d+/)?.[0] || 0);
-      const refMemberNames = [...content.matchAll(/@([a-zA-Z0-9_-]+)/g)].map(([, n]) => n);
-      const refFloors      = extractFloorReferences(contentEl);
-
       return {
         element: cell, floorEl, id: replyId, index: idx,
         memberName, memberLink: authorEl.href, memberAvatar: avatarEl?.src || '',
         content, floor, floorNum, likes,
-        refMemberNames: refMemberNames.length ? refMemberNames : undefined,
-        refFloors:      refFloors.length      ? refFloors      : undefined,
-        children: [],
       };
     }
 
@@ -1753,7 +1534,7 @@
         .filter(Boolean);
     }
 
-    // ── Map 构建，O(n)，供 inferParent 和 hoverPreview 共用 ──
+    // ── Map 构建，O(n)，供悬停引用预览使用 ──
     function buildLookupMaps(allReplies) {
       const floorMap = new Map();
       const nameMap  = new Map();
@@ -1784,333 +1565,11 @@
       return best;
     }
 
-    // ── 父节点推断，Map 查找 + 同名候选二分搜索 ──
-    function inferParent(reply, { floorMap, nameMap }) {
-      const { refMemberNames, refFloors, index, floorNum } = reply;
-      const firstRefFloor = refFloors?.[0] ? Number(refFloors[0]) : null;
-      if (firstRefFloor !== null && firstRefFloor < floorNum) {
-        const exact = floorMap.get(firstRefFloor);
-        if (exact && (!refMemberNames?.length || exact.memberName.toLowerCase() === refMemberNames[0].toLowerCase())) {
-          return exact;
-        }
-      }
-      if (!refMemberNames?.length) return null;
-
-      const targetName = refMemberNames[0].toLowerCase();
-      const candidates = nameMap.get(targetName);
-      const candidate = findPreviousCandidate(candidates, index);
-      return candidate?.floorNum < floorNum ? candidate : null;
-    }
-
-    // ── 折叠持久化（sessionStorage）──
-    function collapseKey(topicId)    { return `${CONFIG.threadTree.collapseKeyPrefix}${topicId}`; }
-    function getCollapsedSet(topicId) {
-      try { return new Set(JSON.parse(sessionStorage.getItem(collapseKey(topicId)) || '[]')); }
-      catch { return new Set(); }
-    }
-    function saveCollapsedSet(topicId, set) {
-      try { sessionStorage.setItem(collapseKey(topicId), JSON.stringify([...set])); }
-      catch (err) { log('Collapse state error:', err); }
-    }
-
-    function syncReplyVisibility(state) {
-      let hiddenThrough = -1;
-      for (const model of state.rows) {
-        model.row.hidden = model.index <= hiddenThrough;
-        const collapsed = state.collapsedSet.has(model.reply.id);
-        if (!model.row.hidden && collapsed) hiddenThrough = model.end;
-        if (model.toggle) {
-          const label = collapsed ? `展开 ${model.count} 条回复` : '收起此分支';
-          model.toggle.setAttribute('aria-expanded', String(!collapsed));
-          model.toggle.setAttribute('aria-label', label);
-          model.toggle.title = label;
-
-          model.hint.hidden = !collapsed;
-        }
-      }
-      state.scheduleLines?.();
-    }
-
-    // Flat rows keep ancestry in the presentation model, not in DOM nesting.
-    function revealAncestors(el) {
-      const row = el?.closest('.reply-row');
-      const state = row?._v2Model.state;
-      if (!state) return;
-      let changed = false;
-      for (let parent = row._v2Model.parent; parent; parent = parent.parent) {
-        if (state.collapsedSet.delete(parent.reply.id)) changed = true;
-      }
-      if (!changed) return;
-      syncReplyVisibility(state);
-      saveCollapsedSet(state.topicId, state.collapsedSet);
-    }
-
-    // ── 头部重排 ──
-    // V2EX 原始结构是一串行内节点，楼层块靠 float:right 贴右边。这里改成一个
-    // flex 行，用一段弹性留白把楼层块推到右边缘：
-    // [用户名 + 标签] [时间 ♥] ——弹性留白—— [♥ ↩ 楼层号]
-    // 时间维持原位（紧跟用户名）。未读状态直接画在楼层号上，不额外插节点。
-    // 结构不符合预期时直接返回，保持 V2EX 原样，不做半吊子改动。
-    function layoutReplyHeader(cell) {
-      const body = cell.querySelector('.reply_content');
-      const bodyContainer = body?.parentElement;
-      if (bodyContainer?.querySelector(':scope > .v2-reply-head')) return;
-      // New V2EX markup groups identity and actions in nested flex rows.
-      // Keep the native action nodes (and their handlers), but normalize the
-      // header before adding parent links so they never fall into the rail gutter.
-      const nativeHead = bodyContainer?.querySelector(':scope > .flex-one-row');
-      const nativeIdentity = nativeHead?.querySelector(':scope > .flex-one-row');
-      const nativeActions = nativeHead?.querySelector('.no')?.parentElement;
-      if (nativeIdentity?.querySelector('strong a[href*="/member/"]') &&
-          nativeActions?.parentElement === nativeHead && nativeActions !== nativeIdentity) {
-        nativeHead.classList.remove('flex-one-row');
-        nativeHead.classList.add('v2-reply-head');
-        nativeIdentity.classList.remove('flex-one-row', 'gap10');
-        nativeIdentity.classList.add('rh-details');
-        const identity = document.createElement('span');
-        identity.className = 'rh-id';
-        const meta = document.createElement('span');
-        meta.className = 'rh-meta';
-        for (const node of [...nativeIdentity.childNodes]) {
-          if (node.nodeType === Node.TEXT_NODE && !node.nodeValue.trim()) node.remove();
-          else if (node.nodeType === Node.ELEMENT_NODE &&
-                   (node.classList.contains('ago') || node.matches('.small.fade'))) meta.append(node);
-          else identity.append(node);
-        }
-        nativeIdentity.append(identity, meta);
-        nativeActions.classList.add('fr');
-        return;
-      }
-      const strong = cell.querySelector('strong');
-      const container = strong?.parentElement;
-      if (!container || container.querySelector(':scope > .v2-reply-head')) return;
-      const content = container.querySelector(':scope > .reply_content');
-      if (!content) return;
-
-      // 收集 strong 到正文之间的头部节点（.sep5 之前）
-      const nodes = [];
-      for (let node = strong; node && node !== content; node = node.nextSibling) {
-        if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('sep5')) break;
-        nodes.push(node);
-      }
-      if (!nodes.length) return;
-
-      const head = document.createElement('div');
-      head.className = 'v2-reply-head';
-      const identity = document.createElement('span');
-      identity.className = 'rh-id';
-      const meta = document.createElement('span');
-      meta.className = 'rh-meta';
-      const gap = document.createElement('span');
-      gap.className = 'rh-gap';
-
-      // 先把空的 head 挂进文档，再往里搬节点。反过来做的话，一旦中途抛异常，
-      // 用户名/时间会跟着游离的 head 一起从页面上消失。
-      container.insertBefore(head, container.querySelector(':scope > .sep5') || content);
-      head.append(identity, meta, gap);
-
-      const likes = [];
-      const times = [];
-      for (const node of nodes) {
-        if (node.nodeType === Node.TEXT_NODE) {
-          // 原来的 &nbsp; 间隔交给 flex gap，非空文本保留在左侧
-          if (node.nodeValue.trim()) identity.appendChild(node);
-          else node.remove();
-          continue;
-        }
-        if (node.nodeType !== Node.ELEMENT_NODE) { node.remove(); continue; }
-        const cls = node.classList;
-        if (cls.contains('ago')) times.push(node);
-        else if (cls.contains('small') && cls.contains('fade')) likes.push(node);
-        else identity.appendChild(node);   // strong / badges / 未知元素一律留在左侧
-      }
-
-      // 时间在前、♥ 在后，保持 V2EX 原本的阅读顺序
-      meta.append(...times, ...likes);
-
-      // 楼层块（感谢/回复按钮 + 楼层号）整体挪到头部末尾，由 .rh-gap 顶到最右。
-      const floor = container.querySelector(':scope > .fr');
-      if (floor) head.appendChild(floor);
-    }
-
-    // 先生成先序列表，再逆序累计后代数；两遍迭代都不消耗调用栈深度。
-    function buildReplyForest(flatReplies, maps) {
-      const roots = [];
-      const parents = new Map();
-      const counts = new Map();
-      for (const reply of flatReplies) { reply.children = []; counts.set(reply, 0); }
-      for (const reply of flatReplies) {
-        const parent = inferParent(reply, maps);
-        if (parent) { parent.children.push(reply); parents.set(reply, parent); }
-        else roots.push(reply);
-      }
-      const ordered = [];
-      const stack = roots.slice().reverse();
-      while (stack.length) {
-        const reply = stack.pop();
-        ordered.push(reply);
-        for (let i = reply.children.length - 1; i >= 0; i--) stack.push(reply.children[i]);
-      }
-      for (let i = ordered.length - 1; i >= 0; i--) {
-        const reply = ordered[i], parent = parents.get(reply);
-        if (parent) counts.set(parent, counts.get(parent) + 1 + counts.get(reply));
-      }
-      return { roots, counts };
-    }
-
-    // Flat DOM, capped visual depth: collapse uses logical ancestry, while
-    // connectors are measured from real avatars (including responsive layouts).
-    function renderTree(flatReplies, maps, container, topicId) {
-      const { roots, counts } = buildReplyForest(flatReplies, maps);
-      const previous = container._v2CollapseState;
-      previous?.observer?.disconnect();
-      if (previous?.frame) cancelAnimationFrame(previous.frame);
-      const state = { topicId, collapsedSet: getCollapsedSet(topicId), rows: [] };
+    // 保留原生回复节点和头部结构，按楼层顺序合并分页。
+    function renderReplies(replies, container) {
       const fragment = document.createDocumentFragment();
-      const make = (tag, cls) => { const el = document.createElement(tag); el.className = cls; return el; };
-      const stack = roots.slice().reverse().map(reply => ({ reply, parent: null, depth: 0 }));
-      while (stack.length) {
-        const model = stack.pop(), { reply, parent, depth } = model;
-        model.state = state; model.index = state.rows.length; model.count = counts.get(reply);
-        model.end = model.index + model.count;
-        const row = model.row = make('div', 'reply-wrapper reply-row');
-        row.dataset.replyId = reply.id; row.dataset.depth = depth; row._v2Model = model;
-        row.style.setProperty('--reply-level', Math.min(depth, 3));
-        reply.element.classList.remove('inner');
-        reply.element.querySelectorAll('.reply-context,.reply-parent-link,.reply-branch-toggle,.reply-collapsed-hint').forEach(el => el.remove());
-        try { layoutReplyHeader(reply.element); } catch (err) { log('楼层头部重排失败：', err); }
-        const head = reply.element.querySelector('.v2-reply-head');
-        let details = head?.querySelector('.rh-details');
-        if (head && !details) {
-          details = make('div', 'rh-details');
-          for (const child of [...head.children]) {
-            if (child.classList.contains('rh-gap')) child.remove();
-            else if (!child.classList.contains('fr')) details.append(child);
-          }
-          head.prepend(details);
-        }
-        const addMeta = el => details ? details.append(el) : reply.element.append(el);
-        if (parent) {
-          const link = make('a', 'reply-parent-link'); link.href = `#${parent.reply.element.id}`;
-          link.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3 2.5 6.5 6 10M3 6.5h6a4 4 0 0 1 4 4V13"/></svg>';
-          link.append(document.createTextNode(`#${parent.reply.floorNum}`));
-          link.title = `回复 ${parent.reply.memberName} 的 #${parent.reply.floorNum} 楼`;
-          link.setAttribute('aria-label', link.title); addMeta(link);
-          link._v2RefReply = parent.reply;
-        }
-        if (reply.children.length) {
-          model.toggle = make('button', 'reply-branch-toggle'); model.toggle.type = 'button';
-          model.toggle.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3 3 3-3"/></svg>';
-          reply.element.append(model.toggle);
-          model.hint = make('button', 'reply-collapsed-hint'); model.hint.type = 'button';
-          model.hint.textContent = `展开 ${model.count} 条回复`; reply.element.append(model.hint);
-        }
-        row.append(reply.element); fragment.append(row); state.rows.push(model);
-        for (let i = reply.children.length - 1; i >= 0; i--) stack.push({ reply: reply.children[i], parent: model, depth: depth + 1 });
-      }
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.classList.add('reply-connectors'); svg.setAttribute('aria-hidden', 'true');
-      fragment.append(svg);
-      container.replaceChildren(fragment); container.classList.add('reply-tree'); container._v2CollapseState = state;
-      // Use fixed indentation steps, but spend only the available reading width.
-      // Measure the root body so avatars, padding and host themes are accounted for.
-      // Keep 72% of its width (240–480px), with an eight-step safety ceiling.
-      function drawLines() {
-        state.frame = 0;
-        const root = state.rows[0];
-        const body = root?.reply.element.querySelector('.reply_content');
-        const bodyWidth = body?.getBoundingClientRect().width || 0;
-        const step = parseFloat(getComputedStyle(container).getPropertyValue('--reply-indent')) || 28;
-        const readingWidth = Math.min(480, Math.max(240, bodyWidth * .72));
-        const maxDepth = Math.min(8, Math.max(0, Math.floor((bodyWidth - readingWidth) / step)));
-        if (state.maxDepth !== maxDepth) {
-          state.maxDepth = maxDepth;
-          container.dataset.maxVisualDepth = String(maxDepth);
-          for (const model of state.rows) {
-            model.row.style.setProperty('--reply-level', Math.min(model.depth, maxDepth));
-          }
-        }
-        const visible = state.rows.filter(model => !model.row.hidden);
-        const bounds = container.getBoundingClientRect();
-        const positions = new Map();
-        const togglePositions = [];
-        // Complete all layout reads before writing button positions or SVG paths.
-        for (const model of visible) {
-          const avatar = model.reply.element.querySelector('.avatar');
-          const rect = avatar?.getBoundingClientRect();
-          if (model.toggle && rect?.width) {
-            const cellRect = model.reply.element.getBoundingClientRect();
-            togglePositions.push({
-              toggle: model.toggle,
-              left: `${rect.right - cellRect.left - 16}px`,
-              top: `${rect.bottom - cellRect.top - 16}px`,
-            });
-          }
-          if (rect?.width && rect.height) positions.set(model, {
-            x: rect.left + rect.width / 2 - bounds.left,
-            left: rect.left - bounds.left, y: rect.top + rect.height / 2 - bounds.top,
-            bottom: rect.bottom - bounds.top + 3
-          });
-        }
-        for (const { toggle, left, top } of togglePositions) {
-          if (toggle.style.left !== left) toggle.style.left = left;
-          if (toggle.style.top !== top) toggle.style.top = top;
-        }
-        const pathData = [];
-        for (const model of visible) {
-          const parent = model.parent;
-          if (!parent || model.depth > state.maxDepth) continue;
-          const start = positions.get(parent), end = positions.get(model);
-          if (!start || !end) continue;
-          // Stop at the avatar edge. Small indents naturally use a smaller elbow.
-          const target = end.left - 2, radius = Math.min(8, Math.max(0, target - start.x));
-          if (target < start.x || end.y <= start.bottom) continue;
-          pathData.push(`M${start.x} ${start.bottom}V${end.y - radius}Q${start.x} ${end.y} ${start.x + radius} ${end.y}H${target}`);
-        }
-        // Unchanged geometry must not rebuild SVG or wake incremental scanners.
-        const signature = pathData.join('\n');
-        if (state.pathSignature === signature) return;
-        state.pathSignature = signature;
-        const paths = document.createDocumentFragment();
-        for (const data of pathData) {
-          const path = document.createElementNS(svg.namespaceURI, 'path');
-          path.setAttribute('d', data);
-          paths.append(path);
-        }
-        svg.replaceChildren(paths);
-      }
-      state.scheduleLines = () => { if (!state.frame) state.frame = requestAnimationFrame(drawLines); };
-      state.observer = new ResizeObserver(state.scheduleLines);
-      state.observer.observe(container);
-      for (const model of state.rows) state.observer.observe(model.reply.element);
-      syncReplyVisibility(state);
-      if (!container._v2AvatarTreeBound) {
-        container._v2AvatarTreeBound = true;
-        let highlightedParent = null;
-        const highlightParent = target => {
-          const link = target?.closest?.('.reply-parent-link');
-          const nextParent = link?._v2RefReply?.element || null;
-          if (highlightedParent === nextParent) return;
-          highlightedParent?.classList.remove('reply-parent-highlight');
-          highlightedParent = nextParent;
-          highlightedParent?.classList.add('reply-parent-highlight');
-        };
-        container.addEventListener('mouseover', e => highlightParent(e.target));
-        container.addEventListener('mouseout', e => highlightParent(e.relatedTarget));
-        container.addEventListener('focusin', e => highlightParent(e.target));
-        container.addEventListener('focusout', e => highlightParent(e.relatedTarget));
-        container.addEventListener('click', e => {
-          const model = e.target.closest?.('.reply-row')?._v2Model; if (!model) return;
-          const link = e.target.closest('.reply-parent-link');
-          if (link) { revealAncestors(document.getElementById(link.hash.slice(1))); return; }
-          const control = e.target.closest('.reply-branch-toggle,.reply-collapsed-hint');
-          if (!control) return;
-          const current = container._v2CollapseState, set = current.collapsedSet;
-          if (set.has(model.reply.id)) set.delete(model.reply.id); else set.add(model.reply.id);
-          if (control === model.hint) model.toggle.focus({ preventScroll: true });
-          syncReplyVisibility(current); saveCollapsedSet(current.topicId, set);
-        });
-      }
+      for (const reply of replies) fragment.append(reply.element);
+      container.replaceChildren(fragment);
       document.dispatchEvent(new Event('v2ex:replies-updated'));
     }
 
@@ -2119,7 +1578,7 @@
     // www.v2ex.com / edge.v2ex.com 三个 origin，localStorage 按 origin 隔离，
     // 换个域名进同一个帖子就会被当成没读过。
     function createReadState(topicId) {
-      const key = `${CONFIG.threadTree.readKeyPrefix}${topicId}`;
+      const key = `${CONFIG.replies.readKeyPrefix}${topicId}`;
       const stored = GM.get(key, null);
       return {
         key,
@@ -2296,8 +1755,6 @@
       }
 
       for (const reply of allReplies) {
-        const parentLink = reply.element.querySelector('.reply-parent-link');
-        if (parentLink?._v2RefReply) bindPreview(parentLink, parentLink._v2RefReply);
         const contentEl = reply.element.querySelector('.reply_content');
         if (!contentEl) continue;
 
@@ -2385,7 +1842,7 @@
 
     async function fetchReplyPage(page) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), CONFIG.threadTree.pageFetchTimeoutMs);
+      const timer = setTimeout(() => controller.abort(), CONFIG.replies.pageFetchTimeoutMs);
       try {
         const res = await fetch(pageUrl(page), {
           credentials: 'include',
@@ -2421,7 +1878,7 @@
           }
         }
       };
-      const workerCount = Math.min(CONFIG.threadTree.pageFetchConcurrency, pages.length);
+      const workerCount = Math.min(CONFIG.replies.pageFetchConcurrency, pages.length);
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
       return results;
     }
@@ -2456,7 +1913,6 @@
     // ── 主流程 ──
     async function init() {
       if (!isTopicPage()) return;
-      initReplyFloorReference();
       const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
       if (!topicId) return;
 
@@ -2467,7 +1923,7 @@
         // （从首页点进刚发出来的新帖，就是这条路径。）
         const emptyState = createReadState(topicId);
         if (emptyState.firstVisit) commitReadState(emptyState, []);
-        log('楼层树：没找到回复容器（.box 内无 div[id^="r_"]），已跳过');
+        log('回复合并：没找到回复容器（.box 内无 div[id^="r_"]），已跳过');
         return;
       }
 
@@ -2499,12 +1955,12 @@
       let maps = buildLookupMaps(allReplies);
       const readState = createReadState(topicId);
       let newCount = markUnread(readState, allReplies);
-      renderTree(allReplies, maps, replyBox, topicId);
+      renderReplies(allReplies, replyBox);
       UserTags.decorate(replyBox);
 
       loadingBar.remove();
-      log(`楼层树：${allReplies.length} 条回复 / 共 ${totalPages} 页（失败 ${failedPages.length} 页），`
-        + `分支 ${replyBox.querySelectorAll('.reply-branch-toggle').length} 组，未读 ${newCount} 条`);
+      log(`回复合并：${allReplies.length} 条回复 / 共 ${totalPages} 页（失败 ${failedPages.length} 页），`
+        + `未读 ${newCount} 条`);
       document.querySelectorAll('a[name="last_page"]').forEach(e => e.remove());
       updateNewCountBar(replyBox, newCount);
       commitReadState(readState, allReplies);
@@ -2550,7 +2006,7 @@
               allReplies = normalizeReplies([...allReplies, ...newReplies]);
               maps = buildLookupMaps(allReplies);
               newCount = markUnread(readState, allReplies);
-              renderTree(allReplies, maps, replyBox, topicId);
+              renderReplies(allReplies, replyBox);
               UserTags.decorate(replyBox);
               updateNewCountBar(replyBox, newCount);
               // 补回来的页可能填上了缺口，让连续前缀继续往前走；
@@ -2576,10 +2032,10 @@
     function boot() {
       init().catch(err => {
         document.getElementById('v2ex-loading-bar')?.remove();
-        log('ThreadTree error:', err);
+        log('Replies error:', err);
       });
     }
-    return { boot, revealAncestors };
+    return { boot };
   })();
 
   // =========================
@@ -2904,9 +2360,9 @@
       window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
     }
     function setActive(el) {
-      if (activeReply) (activeReply.closest('.reply-wrapper') || activeReply).classList.remove('reply-nav-active');
+      if (activeReply) activeReply.classList.remove('reply-nav-active');
       activeReply = el || null;
-      if (el) (el.closest('.reply-wrapper') || el).classList.add('reply-nav-active');
+      if (el) el.classList.add('reply-nav-active');
     }
     function refreshList() {
       if (!listDirty) return;
@@ -2923,8 +2379,6 @@
         : (curIndex < 0 ? newReplies.length - 1 : Math.max(curIndex - 1, 0));
       const target = newReplies[curIndex];
       setActive(target);
-      // 目标可能藏在折叠的子树里，先展开再滚动，否则会滚到一片空白
-      ThreadTree.revealAncestors(target);
       scrollToReply(target);
       showHud(curIndex, newReplies.length, direction);
     }
@@ -4438,7 +3892,7 @@
       });
       refreshMenu();
       // 在默认导航发生前设置 target，保留浏览器原生的新标签页和容器行为。
-      // 委托监听也覆盖树形回复和无限加载后才出现的链接。
+      // 委托监听也覆盖分页合并后才出现的链接。
       document.addEventListener('click', event => {
         if (!enabled || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         const anchor = event.target.closest?.('a[href]');
@@ -4471,7 +3925,7 @@
   ImgurProxy.boot();
   UserTags.boot();
   if (isTopicPage()) {
-    ThreadTree.boot();
+    Replies.boot();
     B64.boot();
     HotRoom.boot();
     NavKeys.boot();

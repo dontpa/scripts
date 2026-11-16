@@ -9,9 +9,9 @@ const {chromium}=require('playwright');
  for(const file of [process.env.V2EX_BASELINE_FILE,current].filter(Boolean)){
   const src=fs.readFileSync(file,'utf8'); const page=await browser.newPage();
   await page.route('**/*',r=>r.fulfill({body:'<body></body>',contentType:'text/html'}));await page.goto('https://edge.v2ex.com/t/1');
-  await page.evaluate(()=>{window.CONFIG={threadTree:{collapseKeyPrefix:'test-'},nav:{scrollOffsetRatio:0.3}};window.log=()=>{};window.isTopicPage=()=>true;});
-  const module=src.slice(src.indexOf('  const ThreadTree ='),src.indexOf('  // 6) 功能D')).replace('return { boot, revealAncestors };','return { boot, revealAncestors, renderTree, buildLookupMaps, markUnread'+(file===current?', buildReplyForest':'')+' };');
-  await page.evaluate(module+'\nwindow.tree=ThreadTree;');
+  await page.evaluate(()=>{window.CONFIG={replies:{},nav:{scrollOffsetRatio:0.3}};window.log=()=>{};window.isTopicPage=()=>true;});
+  const module=src.slice(src.indexOf('  const Replies ='),src.indexOf('  // 6) 功能D')).replace('return { boot };','return { boot, renderReplies, buildLookupMaps, markUnread };');
+  await page.evaluate(module+'\nwindow.tree=Replies;');
   const times=await page.evaluate(()=>{
    const box=document.createElement('div');box.className='box';document.body.append(box);
    const rows=Array.from({length:400},(_,i)=>{
@@ -19,7 +19,7 @@ const {chromium}=require('playwright');
     element.innerHTML='<strong><a>user</a></strong><span class="ago">1h</span><div class="fr"><span class="no">'+i+'</span></div><div class="reply_content">reply text</div>';
     return {element,id:String(i),index:i,floorNum:i+1,memberName:'user',refFloors:i?[String(i)]:undefined,children:[],floorEl:element.querySelector('.no')};
    });window.rows=rows;window.box=box;const maps=tree.buildLookupMaps(rows);let ms=[];
-   for(let i=0;i<5;i++){const start=performance.now();tree.renderTree(rows,maps,box,'bench');ms.push(performance.now()-start);}
+   for(let i=0;i<5;i++){const start=performance.now();tree.renderReplies(rows,box);ms.push(performance.now()-start);}
    const assertCount=box.querySelectorAll('.cell').length;
    return {ms,count:assertCount};
    });assert.equal(times.count,400);
@@ -27,7 +27,7 @@ const {chromium}=require('playwright');
   if(file!==current) baselineDigest=digest;
   else if(baselineDigest) {assert.equal(digest,baselineDigest);console.log('PASS rendered DOM exactly matches baseline');}
   const nav=src.slice(src.indexOf('  const NavKeys ='),src.indexOf('  // 8) 功能F'));
-  await page.evaluate('window.ThreadTree=window.tree;\n'+nav+'\nwindow.nav=NavKeys;');
+  await page.evaluate('window.Replies=window.tree;\n'+nav+'\nwindow.nav=NavKeys;');
   const scans=await page.evaluate(()=>{
    tree.markUnread({firstVisit:false,lastReadFloor:0},rows);
    window.scans=0;const query=document.querySelectorAll.bind(document);
@@ -38,15 +38,8 @@ const {chromium}=require('playwright');
   await page.evaluate(()=>{for(let i=0;i<20;i++)document.dispatchEvent(new KeyboardEvent('keydown',{key:'j'}));});
   console.log(file,JSON.stringify({render:times,navScans:await page.evaluate(()=>window.scans)}));
   if(file===current){
-   const large=await page.evaluate(()=>{
-    const rows=Array.from({length:20000},(_,i)=>({id:String(i),index:i,floorNum:i+1,memberName:'chain',refFloors:i?[String(i)]:undefined}));
-    const forest=tree.buildReplyForest(rows,tree.buildLookupMaps(rows));
-    return {roots:forest.roots.length,count:forest.counts.get(rows[0])};
-   });
-   assert.deepEqual(large,{roots:1,count:19999});
-   console.log('PASS 20,000-level forest without recursive calls');
    assert.equal(await page.evaluate(()=>window.scans),1);
-   await page.evaluate(()=>{tree.renderTree(rows,tree.buildLookupMaps(rows),box,'bench');document.dispatchEvent(new KeyboardEvent('keydown',{key:'j'}));});
+   await page.evaluate(()=>{tree.renderReplies(rows,box);document.dispatchEvent(new KeyboardEvent('keydown',{key:'j'}));});
    assert.equal(await page.evaluate(()=>window.scans),2);
    const helper=src.slice(src.indexOf('  function createSubtreeBatch'),src.indexOf('  function notify'));
    await page.evaluate('(()=>{'+helper+'\nwindow.makeBatch=createSubtreeBatch;window.createSubtreeBatch=createSubtreeBatch;})()');
