@@ -8,6 +8,7 @@ runtime, set `NODE_PATH` and optionally `PLAYWRIGHT_EXECUTABLE_PATH`.
 node --check v2ex-tweaks.user.js
 node tests/v2ex-daily.cjs
 node tests/v2ex-replies.cjs
+node tests/v2ex-nav-native.cjs
 node tests/v2ex-new-tab.cjs
 node tests/v2ex-imgur-toggle.cjs
 node tests/v2ex-tag-menu.cjs
@@ -17,6 +18,11 @@ node tests/v2ex-performance.cjs
 - `v2ex-daily.cjs`: deterministic sign-in lock expiry and server confirmation.
 - `v2ex-replies.cjs`: native thread order and nested containers, native collapse/reply
   controls, visible pagination, no page fetches, and safe unread progress.
+- `v2ex-nav-native.cjs`: all seven native display modes, visual navigation order,
+  nested branch expansion through native buttons, preserved unrelated folds and
+  quote details, hidden replies, IME, Ajax list replacement, and page boundaries.
+  Set `V2EX_OFFICIAL_JS` to a downloaded official combo.js to run against its
+  `toggleReplyTree` helper; `V2EX_BROWSER=webkit` selects WebKit.
 - `v2ex-new-tab.cjs`: native default navigation, opt-in new-tab opening for topic
   and member links, the persistent userscript-manager menu switch, and preserved
   floor/external-link behavior.
@@ -31,3 +37,10 @@ node tests/v2ex-performance.cjs
 The tests use local fixtures and stub requests; they do not sign in to a real
 account or modify live V2EX data. They do not replace checking the installed
 userscript in each supported browser.
+
+New-reply navigation follows the current page's displayed reply order, without
+sorting or moving DOM nodes. Only style d's native collapsed ancestor buttons
+are clicked; quote copies and hidden/blocked replies are not navigation targets.
+Navigation stops at the page boundary and does not fetch or merge other pages.
+Native thread behavior was checked against V2EX's reply-thread help and the
+public `14f3ca1a8a3d30318c6c6a55413ce0fa935c76ea-combo.js` on 2026-11-16.

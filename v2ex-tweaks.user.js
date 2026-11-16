@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.34
+// @version      2.5.35
 // @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
@@ -1541,10 +1541,12 @@
     function commitReadState(state, replies) {
       const floors = new Set();
       for (const r of replies) floors.add(r.floorNum);
-      let contiguous = state.firstVisit ? 0 : state.lastReadFloor;
+      const saved = GM.get(state.key, null);
+      const previous = Number.isSafeInteger(saved) ? saved : state.lastReadFloor;
+      let contiguous = Math.max(0, previous);
       while (floors.has(contiguous + 1)) contiguous++;
       // 进度只前进不后退；firstVisit 时哪怕是 0 也要落一笔，把"没进过"翻成"进过"
-      if (!state.firstVisit && contiguous <= state.lastReadFloor) return;
+      if (saved !== null && contiguous <= previous) return;
       GM.set(state.key, contiguous);
     }
 
@@ -1561,10 +1563,10 @@
         dot.className = 'ncb-dot';
         const strong = document.createElement('strong');
         const text = document.createElement('span');
-        text.append('有 ', strong, ' 条新回复');
+        text.append('本页有 ', strong, ' 条新回复');
         const hint = document.createElement('span');
         hint.className = 'ncb-hint';
-        hint.textContent = 'j / k 键跳转';
+        hint.textContent = 'j / k 按页面顺序跳转';
         bar.append(dot, text, hint);
         bar._countEl = strong;
         replyBox.parentNode.insertBefore(bar, replyBox);
@@ -1751,20 +1753,31 @@
       if (!isTopicPage()) return;
       const topicId = location.pathname.match(/\/t\/(\d+)/)?.[1];
       if (!topicId) return;
-      // 官方楼中楼的 DOM 顺序与楼层编号不同。只整理内存中的索引，
-      // 不移动回复节点，不改写层级、折叠控件、锚点或分页。
-      const replies = Array.from(document.querySelectorAll('div.cell[id^="r_"]'))
-        .map(parseReplyCell).filter(Boolean).sort((a, b) => a.floorNum - b.floorNum);
-      replies.forEach((reply, index) => { reply.index = index; });
       const readState = createReadState(topicId);
-      const newCount = markUnread(readState, replies);
-      const replyBox = replies[0]?.element.closest('.box');
-      if (replyBox) updateNewCountBar(replyBox, newCount);
-      commitReadState(readState, replies);
-      document.dispatchEvent(new Event('v2ex:replies-updated'));
-      // 等待 Base64 本轮处理结束，再给正文引用绑定预览。
-      setTimeout(() => initHoverPreview(replies, buildLookupMaps(replies)), 250);
-      log(`原生回复布局：${replies.length} 条回复，未读 ${newCount} 条`);
+      let hoverTimer;
+      const update = () => {
+        // 只整理内存索引；保留官方 DOM 顺序、层级、折叠和分页。
+        const replies = Array.from(document.querySelectorAll('div.cell[id^="r_"]'))
+          .filter(el => !el.closest('.reply-quote, .reply-card, #v2ex-ref-preview, #hot-overlay'))
+          .map(parseReplyCell).filter(Boolean).sort((a, b) => a.floorNum - b.floorNum);
+        replies.forEach((reply, index) => { reply.index = index; });
+        const newCount = markUnread(readState, replies);
+        const replyBox = replies[0]?.element.closest('.box');
+        if (replyBox) updateNewCountBar(replyBox, newCount);
+        else document.getElementById('v2ex-new-count-bar')?.remove();
+        commitReadState(readState, replies);
+        document.dispatchEvent(new Event('v2ex:replies-updated'));
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => initHoverPreview(replies, buildLookupMaps(replies)), 250);
+      };
+      update();
+      // 官方 Ajax 发帖会替换列表；只响应真实回复节点的增删，忽略标签、预览和连线更新。
+      const scheduleUpdate = debounce(update, 50);
+      const hasReply = node => node.nodeType === Node.ELEMENT_NODE &&
+        (node.matches('div.cell[id^="r_"]') || node.querySelector('div.cell[id^="r_"]'));
+      new MutationObserver(records => {
+        if (records.some(record => [...record.addedNodes, ...record.removedNodes].some(hasReply))) scheduleUpdate();
+      }).observe(document.querySelector('#Main') || document.body, { childList: true, subtree: true });
     }
     return { boot };
   })();
@@ -2062,7 +2075,7 @@
       hudArrow.className = 'hud-arrow';
       const label = document.createElement('span');
       label.className = 'hud-label';
-      label.textContent = 'NEW';
+      label.textContent = '本页新回复';
       const sep = document.createElement('span');
       sep.className = 'hud-sep';
       sep.textContent = ' / ';
@@ -2088,7 +2101,7 @@
     }
     function scrollToReply(el) {
       const targetTop = el.getBoundingClientRect().top + window.scrollY - window.innerHeight * SCROLL_OFFSET_RATIO;
-      window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+      window.scrollTo({ top: Math.max(0, targetTop), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
     }
     function setActive(el) {
       if (activeReply) activeReply.classList.remove('reply-nav-active');
@@ -2098,20 +2111,56 @@
     function refreshList() {
       if (!listDirty) return;
       listDirty = false;
-      newReplies = Array.from(document.querySelectorAll('.reply-new'));
+      newReplies = Array.from(document.querySelectorAll('div.cell.reply-new[id^="r_"]'))
+        .filter(el => !el.closest('.reply-quote, .reply-card, #v2ex-ref-preview, #hot-overlay'));
       const activeIndex = activeReply ? newReplies.indexOf(activeReply) : -1;
       curIndex = activeIndex >= 0 ? activeIndex : -1;
     }
+    function isVisible(el) {
+      return el.isConnected && el.getClientRects().length > 0 &&
+        !['hidden', 'collapse'].includes(getComputedStyle(el).visibility);
+    }
+    function revealTarget(el) {
+      // 不移除 hidden / display:none，不绕过屏蔽或隐藏回复。
+      if (el.hidden || el.style.display === 'none') return false;
+      if (isVisible(el)) return true;
+      if (!el.matches('.reply-threads-d > .cell.reply-tree-hidden[data-depth]')) return false;
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        if (parent.hidden || getComputedStyle(parent).display === 'none') return false;
+      }
+      // 对照官方 revealReply：沿前方同级节点查找祖先，从外到内点击官方折叠按钮。
+      // click 保证官方的 aria-expanded、隐藏类和后续折叠操作始终一致，适用于脚本沙箱。
+      const folded = [];
+      let depth = Number(el.dataset.depth);
+      for (let prev = el.previousElementSibling; prev && depth > 0; prev = prev.previousElementSibling) {
+        if (!prev.matches('.cell[data-depth]')) continue;
+        const previousDepth = Number(prev.dataset.depth);
+        if (previousDepth < depth) {
+          depth = previousDepth;
+          const toggle = prev.querySelector(':scope > .reply-toggle[aria-expanded="false"]');
+          if (toggle) folded.unshift(toggle);
+        }
+      }
+      for (const toggle of folded) {
+        if (!isVisible(toggle)) return false;
+        toggle.click();
+      }
+      return isVisible(el);
+    }
     function navigate(direction) {
       refreshList();
-      if (!newReplies.length) return;
-      curIndex = direction === 'next'
-        ? Math.min(curIndex + 1, newReplies.length - 1)
-        : (curIndex < 0 ? newReplies.length - 1 : Math.max(curIndex - 1, 0));
-      const target = newReplies[curIndex];
-      setActive(target);
-      scrollToReply(target);
-      showHud(curIndex, newReplies.length, direction);
+      const step = direction === 'next' ? 1 : -1;
+      let index = curIndex < 0 ? (step > 0 ? 0 : newReplies.length - 1) : curIndex + step;
+      for (; index >= 0 && index < newReplies.length; index += step) {
+        const target = newReplies[index];
+        if (!revealTarget(target)) continue;
+        curIndex = index;
+        setActive(target);
+        scrollToReply(target);
+        showHud(index, newReplies.length, direction);
+        return true;
+      }
+      return false;
     }
     function onKeyDown(e) {
       const tag = document.activeElement?.tagName?.toLowerCase();
@@ -2122,8 +2171,9 @@
       if (document.getElementById('v2t-manager')?.classList.contains('active')) return;
       if (document.getElementById('v2ex-lightbox')?.classList.contains('active')) return;
       if (document.getElementById('v2t-editor')?.classList.contains('visible')) return;
-      if (e.key === 'j') { e.preventDefault(); navigate('next'); }
-      else if (e.key === 'k') { e.preventDefault(); navigate('prev'); }
+      if (e.defaultPrevented || e.isComposing || e.shiftKey) return;
+      if (e.key === 'j' && navigate('next')) e.preventDefault();
+      else if (e.key === 'k' && navigate('prev')) e.preventDefault();
     }
     function boot() {
       if (!isTopicPage()) return;

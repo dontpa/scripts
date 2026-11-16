@@ -18,7 +18,7 @@ const {chromium}=require('playwright');
   await page.evaluate(nav+'\nwindow.nav=NavKeys;');
   const scans=await page.evaluate(()=>{
    window.scans=0;const query=document.querySelectorAll.bind(document);
-   document.querySelectorAll=(selector)=>{if(selector==='.reply-new')window.scans++;return query(selector);};
+   document.querySelectorAll=(selector)=>{if(selector==='div.cell.reply-new[id^="r_"]')window.scans++;return query(selector);};
   });
   // module const persists in this browser realm
   await page.evaluate('window.nav.boot();');

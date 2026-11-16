@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 (async () => {
   const source = fs.readFileSync(path.join(__dirname, '../v2ex-tweaks.user.js'), 'utf8');
-  assert.doesNotMatch(source, /ThreadTree|reply-tree|reply-branch-toggle|initReplyFloorReference|renderReplies|fetchReplyPage|#bottom-pagination/);
+  assert.doesNotMatch(source, /ThreadTree|reply-wrapper|reply-branch-toggle|initReplyFloorReference|renderReplies|fetchReplyPage|#bottom-pagination/);
   const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined });
   try {
     const page = await browser.newPage();
@@ -20,6 +20,7 @@ const { chromium } = require('playwright');
       await page.evaluate(() => {
         window.CONFIG = {replies: {readKeyPrefix: 'test-read-'}};
         window.log = () => {}; window.isTopicPage = () => true;
+        window.debounce = (fn, ms) => { let timer; return () => { clearTimeout(timer); timer = setTimeout(fn, ms); }; };
         window.saved = [];
         window.GM = {get: () => 49, set: (...args) => saved.push(args)};
         window.fetch = () => { throw new Error('Replies must not fetch other pages'); };
