@@ -9,6 +9,7 @@ node --check v2ex-tweaks.user.js
 node tests/v2ex-daily.cjs
 node tests/v2ex-replies.cjs
 node tests/v2ex-unread.cjs
+node tests/v2ex-reply-highlights.cjs
 node tests/v2ex-nav-native.cjs
 node tests/v2ex-new-tab.cjs
 node tests/v2ex-imgur-toggle.cjs
@@ -17,6 +18,9 @@ node tests/v2ex-performance.cjs
 ```
 
 - `v2ex-daily.cjs`: deterministic sign-in lock expiry and server confirmation.
+- `v2ex-reply-highlights.cjs`: modern reply headers, light/dark unread badge
+  colors, parent/child isolation, and group-aligned outlines for single and
+  multiple child replies. Writes preview PNGs under `/tmp`.
 - `v2ex-unread.cjs`: later-page refresh, missing floors, native ordering, legacy
   numeric progress migration and stale-page writes.
 - `v2ex-replies.cjs`: native thread order and nested containers, native collapse/reply

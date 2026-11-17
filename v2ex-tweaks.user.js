@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.36
+// @version      2.5.37
 // @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
@@ -648,8 +648,7 @@
 
     /* 普通楼层号完全沿用 V2EX 原生样式；未读仅在原有数字上叠加颜色。
        外扩的浅色底不占布局空间，字号、字重和内边距都保持原样。 */
-    .cell.reply-new .fr .no,
-    .cell.reply-new:hover .fr .no {
+    .no.v2-reply-unread {
       color: var(--new-pill-fg) !important;
       background: var(--new-pill-bg) !important;
       box-shadow: 0 0 0 2px var(--new-pill-bg);
@@ -689,6 +688,23 @@
     #v2ex-nav-hud .hud-sep { opacity: 0.2; }
     #v2ex-nav-hud .hud-hint { opacity: 0.35; font-size: 11px; font-family: monospace; }
     .cell.reply-nav-active { outline: 2px solid rgba(74,122,240,0.50) !important; outline-offset: -2px; transition: outline 0.15s ease; }
+
+    /* 楼中楼的背景属于 reply-group，左右留白不属于子回复 cell。
+       仅扩展选中描边，不改变回复宽度、内边距或官方布局。 */
+    .reply-group > .cell.reply-nav-active { position: relative; outline: none !important; }
+    .reply-group > .cell.reply-nav-active::after {
+      content: ''; position: absolute; pointer-events: none; box-sizing: border-box;
+      top: 0; bottom: 0;
+      left: calc(-1 * var(--v2-nav-pad-left, 0px));
+      right: calc(-1 * var(--v2-nav-pad-right, 0px));
+      border: 2px solid rgba(74,122,240,0.50);
+    }
+    .reply-group > .cell.reply-nav-active:first-child::after {
+      border-top-left-radius: var(--v2-nav-radius, 0px); border-top-right-radius: var(--v2-nav-radius, 0px);
+    }
+    .reply-group > .cell.reply-nav-active:last-child::after {
+      border-bottom-left-radius: var(--v2-nav-radius, 0px); border-bottom-right-radius: var(--v2-nav-radius, 0px);
+    }
 
     /* ===== Base64 解码 ===== */
     .v2-b64-wrap {
@@ -860,8 +876,7 @@
       --new-pill-fg: #b4c8ff;
     }
     /* 夜间仅调整未读色值，普通楼层号仍交给站点主题。 */
-    #Wrapper.Night .cell.reply-new .fr .no,
-    #Wrapper.Night .cell.reply-new:hover .fr .no {
+    #Wrapper.Night .no.v2-reply-unread {
       color: var(--new-pill-fg) !important;
       background: var(--new-pill-bg) !important;
     }
@@ -1548,6 +1563,7 @@
         const unread = !state.firstVisit && !seen;
         r.element.classList.toggle('reply-new', unread);
         if (r.floorEl) {
+          r.floorEl.classList.toggle('v2-reply-unread', unread);
           if (unread) r.floorEl.title = '未读新回复';
           else if (r.floorEl.title === '未读新回复') r.floorEl.removeAttribute('title');
         }
@@ -2127,9 +2143,20 @@
       window.scrollTo({ top: Math.max(0, targetTop), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
     }
     function setActive(el) {
-      if (activeReply) activeReply.classList.remove('reply-nav-active');
+      if (activeReply) {
+        activeReply.classList.remove('reply-nav-active');
+        for (const name of ['--v2-nav-pad-left', '--v2-nav-pad-right', '--v2-nav-radius']) activeReply.style.removeProperty(name);
+      }
       activeReply = el || null;
-      if (el) el.classList.add('reply-nav-active');
+      if (el) {
+        if (el.parentElement?.classList.contains('reply-group')) {
+          const groupStyle = getComputedStyle(el.parentElement);
+          el.style.setProperty('--v2-nav-pad-left', groupStyle.paddingLeft);
+          el.style.setProperty('--v2-nav-pad-right', groupStyle.paddingRight);
+          el.style.setProperty('--v2-nav-radius', groupStyle.borderRadius);
+        }
+        el.classList.add('reply-nav-active');
+      }
     }
     function refreshList() {
       if (!listDirty) return;

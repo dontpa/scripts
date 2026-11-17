@@ -46,7 +46,7 @@ const { chromium } = require('playwright');
       const result = await page.evaluate(() => {
         const group = document.getElementById('native-group');
         const allUnread = cells.every(cell => cell.classList.contains('reply-new'));
-        cells.forEach(cell => { cell.classList.remove('reply-new'); cell.querySelector('.no').removeAttribute('title'); });
+        cells.forEach(cell => { cell.classList.remove('reply-new'); cell.querySelector('.no').removeAttribute('title'); cell.querySelector('.no').classList.remove('v2-reply-unread'); });
         const unchanged = group.innerHTML === original;
         cells[0].querySelector('a').click();
         document.getElementById('native-toggle').click();

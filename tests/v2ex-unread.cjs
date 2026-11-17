@@ -7,7 +7,7 @@ const moduleCode = source.slice(source.indexOf('  const Replies ='), source.inde
 const store = new Map();
 const context = {CONFIG: {replies: {readKeyPrefix: 'read-'}}, GM: {get: (k,d) => store.has(k) ? store.get(k) : d, set: (k,v) => store.set(k,v)}, document: {dispatchEvent() {}}, Event: class {}};
 vm.createContext(context); vm.runInContext(moduleCode + '\nthis.api = Replies;', context);
-const rows = floors => floors.map(floorNum => ({floorNum, element: {classList: {add() {}, remove() {}, toggle() {}}}, floorEl: {title: '', removeAttribute() {}}}));
+const rows = floors => floors.map(floorNum => ({floorNum, element: {classList: {add() {}, remove() {}, toggle() {}}}, floorEl: {classList: {toggle() {}}, title: '', removeAttribute() {}}}));
 const visit = floors => {
  const state = context.api.createReadState('1'), replies = rows(floors);
  const count = context.api.markUnread(state, replies); context.api.commitReadState(state, replies); return count;
