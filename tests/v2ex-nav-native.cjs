@@ -104,7 +104,7 @@ const replies = source.slice(source.indexOf('  const Replies ='), source.indexOf
         box.innerHTML = '<div class="cell" id="r_20"><span class="no">20</span><strong><a>u</a></strong><div class="reply_content">fresh</div></div><div class="cell" id="r_21" style="display:none"><span class="no">21</span><strong><a>u</a></strong><div class="reply_content">hidden</div></div>';
       });
       await page.waitForTimeout(350);
-      assert.equal(await page.evaluate(() => savedFloor), 3, 'Ajax replacement must not roll back saved progress');
+      assert.deepEqual(await page.evaluate(() => savedFloor), {version: 2, floor: 3, ranges: [[5,7],[20,21]]}, 'Ajax replacement must preserve existing seen ranges');
       assert.equal(await page.evaluate(() => key('j')), true);
       assert.equal(await page.locator('.reply-nav-active').getAttribute('id'), 'r_20');
       const scrollCount = await page.evaluate(() => scrolls.length);
@@ -115,6 +115,31 @@ const replies = source.slice(source.indexOf('  const Replies ='), source.indexOf
       assert.deepEqual(errors, []);
       await page.close();
     }
+    const page = await browser.newPage();
+    await page.route('**/*', r => r.fulfill({body: '<main id="Main"><div class="box" id="replies"></div></main>', contentType: 'text/html'}));
+    await page.goto('https://edge.v2ex.com/t/2?p=2');
+    await page.evaluate(() => {
+      window.CONFIG = {replies: {readKeyPrefix: 'test-'}};
+      window.isTopicPage = () => true; window.log = () => {};
+      window.saved = null; window.GM = {get: () => saved, set: (_key, value) => saved = value};
+      window.debounce = (fn, ms) => { let id; return () => {clearTimeout(id); id = setTimeout(fn, ms);}; };
+      window.addReply = floor => {
+        const cell = document.createElement('div'); cell.className = 'cell'; cell.id = `r_${floor}`;
+        cell.innerHTML = `<div class="fr"><span class="no">${floor}</span></div><strong><a>u</a></strong><div class="reply_content">body</div>`;
+        document.getElementById('replies').append(cell);
+      };
+      addReply(51);
+    });
+    await page.evaluate(replies + '\nReplies.boot();');
+    assert.equal(await page.locator('.reply-new').count(), 0);
+    await page.evaluate(() => addReply(52));
+    await page.waitForTimeout(350);
+    assert.deepEqual(await page.locator('.reply-new').evaluateAll(els => els.map(el => el.id)), ['r_52'], 'first visit transitions to tracking newly added replies');
+    await page.evaluate(() => addReply(53));
+    await page.waitForTimeout(350);
+    assert.deepEqual(await page.locator('.reply-new').evaluateAll(els => els.map(el => el.id)), ['r_52','r_53'], 'new markers survive subsequent updates');
+    assert.deepEqual(await page.evaluate(() => saved), {version: 2, floor: 0, ranges: [[51,53]]});
+    await page.close();
     console.log('PASS all seven native styles, visual order, nested collapse, preserved branches/quotes, hidden replies, IME, Ajax replacement and page boundaries');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

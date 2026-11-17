@@ -64,7 +64,7 @@ const { chromium } = require('playwright');
       assert.equal(result.native, 'yes');
       assert.equal(result.collapsed, true);
       assert.equal(result.pagination, true);
-      assert.deepEqual(result.saved, [], 'a later page must not advance past unloaded replies');
+      assert.deepEqual(result.saved, [['test-read-1', {version: 2, floor: 49, ranges: [[51,55]]}]], 'remember this page without marking the missing floor read');
     }
     console.log('PASS native threaded/flat order, nested containers, collapse and reply controls, pagination, no page fetches, and safe unread progress');
   } finally { await browser.close(); }

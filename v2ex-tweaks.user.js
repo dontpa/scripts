@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.35
+// @version      2.5.36
 // @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
@@ -1510,44 +1510,59 @@
     // 阅读进度走 GM 存储而不是 localStorage：脚本 @match 了 v2ex.com /
     // www.v2ex.com / edge.v2ex.com 三个 origin，localStorage 按 origin 隔离，
     // 换个域名进同一个帖子就会被当成没读过。
+    function decodeReadProgress(stored) {
+      // 兼容旧版的单一楼层水位；新版额外保存跨页/缺号情况下实际见过的区间。
+      if (Number.isSafeInteger(stored) && stored >= 0) return { floor: stored, ranges: [] };
+      const floor = Number.isSafeInteger(stored?.floor) && stored.floor >= 0 ? stored.floor : 0;
+      const ranges = Array.isArray(stored?.ranges) ? stored.ranges.filter(range =>
+        Array.isArray(range) && range.length === 2 && range.every(n => Number.isSafeInteger(n) && n > 0) && range[0] <= range[1]) : [];
+      return mergeReadProgress({ floor, ranges }, []);
+    }
+
+    function mergeReadProgress(progress, floors) {
+      const sorted = [...progress.ranges, ...floors.filter(n => Number.isSafeInteger(n) && n > 0).map(n => [n, n])]
+        .map(range => [...range]).sort((a, b) => a[0] - b[0]);
+      let floor = progress.floor;
+      const ranges = [];
+      for (const [start, end] of sorted) {
+        if (start <= floor + 1) { floor = Math.max(floor, end); continue; }
+        const previous = ranges[ranges.length - 1];
+        if (previous && start <= previous[1] + 1) previous[1] = Math.max(previous[1], end);
+        else ranges.push([start, end]);
+      }
+      return { floor, ranges };
+    }
+
     function createReadState(topicId) {
       const key = `${CONFIG.replies.readKeyPrefix}${topicId}`;
       const stored = GM.get(key, null);
-      return {
-        key,
-        // null = 真的没进过。首次访问不标记，否则满屏都是"新回复"。
-        firstVisit: stored === null,
-        lastReadFloor: Number.isSafeInteger(stored) ? stored : 0,
-      };
+      const progress = decodeReadProgress(stored);
+      return { key, firstVisit: stored === null, lastReadFloor: progress.floor, readRanges: progress.ranges };
     }
 
     function markUnread(state, replies) {
-      if (state.firstVisit) return 0;
       let newCount = 0;
       for (const r of replies) {
-        if (r.floorNum <= state.lastReadFloor) continue;
-        newCount++;
-        // 未读状态全靠这个 class 驱动：楼层数字变为蓝色，
-        // 不再往头部塞任何额外节点（见 .cell.reply-new .fr .no）
-        r.element.classList.add('reply-new');
-        // 楼层号节点在解析阶段就拿到了，不必再 querySelector 一遍
-        if (r.floorEl) r.floorEl.title = '未读新回复';
+        const seen = r.floorNum <= state.lastReadFloor ||
+          (state.readRanges || []).some(([start, end]) => r.floorNum >= start && r.floorNum <= end);
+        const unread = !state.firstVisit && !seen;
+        r.element.classList.toggle('reply-new', unread);
+        if (r.floorEl) {
+          if (unread) r.floorEl.title = '未读新回复';
+          else if (r.floorEl.title === '未读新回复') r.floorEl.removeAttribute('title');
+        }
+        if (unread) newCount++;
       }
       if (newCount) document.dispatchEvent(new Event('v2ex:replies-updated'));
       return newCount;
     }
 
-    // 在已有进度上仅推进连续出现的楼层，避免把未访问分页里的回复标成已读。
     function commitReadState(state, replies) {
-      const floors = new Set();
-      for (const r of replies) floors.add(r.floorNum);
-      const saved = GM.get(state.key, null);
-      const previous = Number.isSafeInteger(saved) ? saved : state.lastReadFloor;
-      let contiguous = Math.max(0, previous);
-      while (floors.has(contiguous + 1)) contiguous++;
-      // 进度只前进不后退；firstVisit 时哪怕是 0 也要落一笔，把"没进过"翻成"进过"
-      if (saved !== null && contiguous <= previous) return;
-      GM.set(state.key, contiguous);
+      // 每次写入前合并最新存储，避免旧页面稍后更新时覆盖另一页已记录的区间。
+      const stored = GM.get(state.key, null);
+      const progress = mergeReadProgress(decodeReadProgress(stored), replies.map(r => r.floorNum));
+      const next = { version: 2, ...progress };
+      if (JSON.stringify(stored) !== JSON.stringify(next)) GM.set(state.key, next);
     }
 
     function updateNewCountBar(replyBox, newCount) {
@@ -1766,6 +1781,14 @@
         if (replyBox) updateNewCountBar(replyBox, newCount);
         else document.getElementById('v2ex-new-count-bar')?.remove();
         commitReadState(readState, replies);
+        // 首次快照不标新，但后续 Ajax 新出现的回复必须与首次快照比较。
+        // 普通回访则保持入页时的快照，让本轮新回复高亮不因重绘而消失。
+        if (readState.firstVisit) {
+          const initial = mergeReadProgress({ floor: 0, ranges: [] }, replies.map(r => r.floorNum));
+          readState.firstVisit = false;
+          readState.lastReadFloor = initial.floor;
+          readState.readRanges = initial.ranges;
+        }
         document.dispatchEvent(new Event('v2ex:replies-updated'));
         clearTimeout(hoverTimer);
         hoverTimer = setTimeout(() => initHoverPreview(replies, buildLookupMaps(replies)), 250);
