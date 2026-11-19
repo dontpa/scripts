@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         V2EX Tweaks
 // @namespace    https://tampermonkey.net/
-// @version      2.5.37
+// @version      2.5.38
 // @description  V2EX 日常增强：可选在新标签页打开帖子与用户主页；用户多标签（批量添加 / 本地存储 / 导入导出 / 智能合并）；未读新回复标记 + j/k 跳转；高赞阅览室（图片 Lightbox）；Base64 解码（熵过滤）；悬停引用预览；每日签到；Imgur 代理。
 // @author       vivaldi@v2ex
 // @match        https://v2ex.com/*
@@ -2076,7 +2076,8 @@
         hot.className = thank?.className || 'tb';
         hot.href = '#;';
         hot.textContent = '高赞';
-        hot.title = '查看高赞回复';
+        hot.title = '查看高赞回复（h）';
+        hot.setAttribute('aria-keyshortcuts', 'h');
         hot.addEventListener('click', event => {
           event.preventDefault();
           event.stopPropagation();
@@ -2090,11 +2091,11 @@
       }, 500);
     }
 
-    return { boot };
+    return { boot, open: openHotRoom };
   })();
 
   // =========================
-  // 7) 功能E：j/k 键盘导航（按需刷新，无常驻扫描）
+  // 7) 功能E：j/k 新回复导航、h 高赞阅览室
   // =========================
   const NavKeys = (() => {
     const SCROLL_OFFSET_RATIO = CONFIG.nav.scrollOffsetRatio;
@@ -2222,6 +2223,11 @@
       if (document.getElementById('v2ex-lightbox')?.classList.contains('active')) return;
       if (document.getElementById('v2t-editor')?.classList.contains('visible')) return;
       if (e.defaultPrevented || e.isComposing || e.shiftKey) return;
+      if (e.key === 'h' && !e.repeat) {
+        e.preventDefault();
+        HotRoom.open();
+        return;
+      }
       if (e.key === 'j' && navigate('next')) e.preventDefault();
       else if (e.key === 'k' && navigate('prev')) e.preventDefault();
     }
